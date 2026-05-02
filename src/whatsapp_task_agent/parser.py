@@ -272,7 +272,8 @@ def _build_system_prompt(
         "- Se a consulta menciona o nome de outro membro do time, use task_status com member_name — nunca list_my_tasks",
         "- Exemplos de task_status: 'Leo já fez o deploy?', 'como está a tarefa da Nanocare?', 'o que o Leo tem pendente?', 'tarefas do Leo', 'status do deploy', 'a Nanocare está pendente?'",
         "- Em task_status, use status_filter='open' para pendências e status_filter='all' para perguntas do tipo 'já fez?', 'já terminou?', 'como está?'",
-        "- 'feito', 'já finalizei', 'terminei', 'concluí', 'já entreguei', 'pronto, finalizei' = complete_task (NÃO start_task); task_reference só se houver nome explícito da tarefa na mensagem",
+        "- 'feito', 'já finalizei', 'terminei', 'concluí', 'já entreguei', 'pronto, finalizei', 'finalizei essa tarefa', 'finalizei isso', 'terminei essa', 'essa tarefa foi feita' = complete_task (NÃO start_task); task_reference vazio quando a referência for demonstrativo ('essa tarefa', 'isso', 'ela', 'esta') — deixe o sistema resolver pelo contexto da mensagem citada",
+        "- 'quais as tarefas que eu finalizei', 'o que eu terminei', 'o que eu já finalizei', 'tarefas que eu finalizei', 'me mostra o que já fiz' = list_my_tasks com filter='done'",
         "- Para nomes do time, aceite variações de transcrição próximas: 'Mateus' pode ser 'Matheus' se houver um Matheus nos membros",
         "- O responsável pode aparecer no começo, meio ou fim: 'Matheus, ...', 'quero que o Matheus ...', 'passa para o Matheus ...', 'essa tarefa é para o Matheus'; preencha assignee_name quando houver um membro claro",
         "- Se mais de um membro for mencionado e não houver responsável claro, deixe assignee_name=null e reduza a confidence",
@@ -305,6 +306,7 @@ def _build_system_prompt(
         "",
         "Exemplos de params por ação:",
         'create_task: {"title": "Revisar proposta", "due_date": "2026-05-01T10:00:00", "assignee_name": "João", "client_name": "Alpha", "priority": "high"}',
+        'list_my_tasks (tarefas finalizadas): {"filter": "done", "view": "my"}',
         'list_my_tasks (minhas tarefas): {"filter": "pending", "view": "my"}',
         'list_my_tasks (delegadas): {"filter": "pending", "view": "delegated"}',
         'list_my_tasks (minhas + delegadas): {"filter": "pending", "view": "all"}',
@@ -753,11 +755,19 @@ def _parse_locally(message: str) -> ParsedCommand:
             confidence=70,
         )
 
-    if _contains_command_word(text, ["concluir", "conclui", "feito", "finalizar"]):
+    _complete_verbs = ["concluir", "conclui", "feito", "finalizar", "finalizei", "terminei", "entregue", "entregou", "entregamos", "ja fiz", "ja terminei", "ja finalizei", "ja conclui"]
+    if _contains_command_word(text, _complete_verbs):
+        _raw_ref = _after_any(text, _complete_verbs)
+        # Demonstratives like "essa tarefa", "isso", "ela" are not real task references —
+        # strip them so acknowledge_task_completion resolves via quoted message body
+        _DEMONSTRATIVES = {"essa tarefa", "essa", "isso", "ela", "este", "esta", "aqui", "a tarefa"}
+        _ref = _raw_ref.strip() if _raw_ref else ""
+        if _ref.lower() in _DEMONSTRATIVES or not _ref:
+            _ref = ""
         return ParsedCommand(
             intent=Intent.command,
             action=Action.complete_task,
-            params={"task_reference": _after_any(text, ["concluir", "conclui", "feito", "finalizar"])},
+            params={"task_reference": _ref} if _ref else {},
             confidence=75,
         )
 
@@ -911,17 +921,30 @@ def _detect_task_query_params(text: str) -> dict | None:
         "tarefas que conclui",
         "tarefas que eu conclui",
         "tarefas que finalizei",
+        "tarefas que eu finalizei",
         "tarefas que terminei",
+        "tarefas que eu terminei",
         "tarefas que ja conclui",
+        "tarefas que ja finalizei",
+        "tarefas que ja terminei",
         "historico de tarefas",
         "historico das tarefas",
         "tarefas concluidas",
         "minhas concluidas",
         "o que conclui",
         "o que eu conclui",
+        "o que finalizei",
+        "o que eu finalizei",
+        "o que terminei",
+        "o que eu terminei",
         "o que ja fiz",
+        "o que ja finalizei",
+        "o que ja terminei",
         "tarefas feitas",
         "minhas tarefas feitas",
+        "ja conclui",
+        "ja finalizei",
+        "ja terminei",
     ]
     if _contains_any(text, done_terms):
         return {"filter": "done"}
