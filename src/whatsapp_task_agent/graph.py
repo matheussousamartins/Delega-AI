@@ -431,11 +431,43 @@ def execute_start_task(state: AgentState) -> AgentState:
 
 def execute_reschedule_task(state: AgentState) -> AgentState:
     params = state["parsed"].params
+    due_at_raw = params.get("due_date")
 
     if params.get("clear_due_date"):
         return {"result": tools.clear_task_due_date(state["context"], params)}
 
-    if not params.get("task_reference") and not params.get("due_date"):
+    # When the user quotes a bot notification, that body is an unambiguous pointer to
+    # the intended task — resolve it BEFORE any task_reference logic. task_reference
+    # may have been populated from conversation history (wrong task) rather than the
+    # current message. Quoted body always wins when it clearly matches a task.
+    quoted = state.get("quoted_message_body")
+    if quoted and due_at_raw:
+        visible = store.list_visible_tasks(
+            company_id=state["context"]["company_id"],
+            requester_user_id=state["context"]["user_id"],
+            requester_role=state["context"]["role"],
+            status_filter="open",
+        )
+        matched = _match_task_from_message(quoted, visible)
+        if matched is not None:
+            due_at = datetime.fromisoformat(due_at_raw.replace("Z", "+00:00"))
+            updated = store.reschedule_task_by_id(
+                state["context"]["company_id"],
+                state["context"]["user_id"],
+                str(matched.id),
+                due_at,
+            )
+            if updated is not None:
+                return {
+                    "result": {"rescheduled": True, **tools.task_update_payload(state["context"], updated, "rescheduled")},
+                    "reply": (
+                        "Prazo atualizado.\n\n"
+                        f"Tarefa: {updated.title}\n"
+                        f"Novo prazo: {_format_due_at(updated.due_at.isoformat() if updated.due_at else None)}"
+                    ),
+                }
+
+    if not params.get("task_reference") and not due_at_raw:
         return {
             "result": {"rescheduled": False, "reason": "missing_task_reference_and_due_date"},
             "reply": (
@@ -445,7 +477,6 @@ def execute_reschedule_task(state: AgentState) -> AgentState:
             ),
         }
     if not params.get("task_reference"):
-        due_at_raw = params.get("due_date")
         tasks = store.list_visible_tasks(
             company_id=state["context"]["company_id"],
             requester_user_id=state["context"]["user_id"],
@@ -457,12 +488,6 @@ def execute_reschedule_task(state: AgentState) -> AgentState:
                 "result": {"rescheduled": False, "reason": "no_visible_tasks"},
                 "reply": "Não encontrei tarefas abertas para atualizar o prazo.",
             }
-        # User replied directly to a bot notification — resolve task from quoted body
-        quoted = state.get("quoted_message_body")
-        if quoted and len(tasks) > 1:
-            matched = _match_task_from_message(quoted, tasks)
-            if matched is not None:
-                tasks = [matched]
         if len(tasks) == 1 and due_at_raw:
             due_at = datetime.fromisoformat(due_at_raw.replace("Z", "+00:00"))
             updated = store.reschedule_task_by_id(
@@ -506,7 +531,7 @@ def execute_reschedule_task(state: AgentState) -> AgentState:
             "result": {"rescheduled": False, "reason": "missing_task_reference"},
             "reply": "Qual tarefa voce quer reagendar?",
         }
-    if not params.get("due_date"):
+    if not due_at_raw:
         return {
             "result": {"rescheduled": False, "reason": "missing_due_date"},
             "reply": f"Para quando devo reagendar {params['task_reference']}?",
@@ -516,6 +541,19 @@ def execute_reschedule_task(state: AgentState) -> AgentState:
 
 def execute_cancel_task(state: AgentState) -> AgentState:
     params = state["parsed"].params
+    # When user quotes a bot notification, resolve the task from the quoted body
+    # before falling through to "which task?" — covers demonstratives and history-resolved refs
+    quoted = state.get("quoted_message_body")
+    if quoted and not params.get("task_reference"):
+        visible = store.list_visible_tasks(
+            company_id=state["context"]["company_id"],
+            requester_user_id=state["context"]["user_id"],
+            requester_role=state["context"]["role"],
+            status_filter="open",
+        )
+        matched = _match_task_from_message(quoted, visible)
+        if matched is not None:
+            params = {**params, "task_reference": matched.title}
     if not params.get("task_reference"):
         return {
             "result": {"cancelled": False, "reason": "missing_task_reference"},
@@ -529,9 +567,21 @@ def execute_cancel_task(state: AgentState) -> AgentState:
 
 def execute_edit_task(state: AgentState) -> AgentState:
     params = state["parsed"].params
-    if not params.get("task_reference") and not any(
-        params.get(k) for k in ("new_title", "new_assignee_name", "new_client_name")
-    ):
+    has_changes = any(params.get(k) for k in ("new_title", "new_assignee_name", "new_client_name"))
+    # When user quotes a bot notification and sends an edit command without naming the task,
+    # resolve task_reference from the quoted body before asking for clarification
+    quoted = state.get("quoted_message_body")
+    if quoted and not params.get("task_reference") and has_changes:
+        visible = store.list_visible_tasks(
+            company_id=state["context"]["company_id"],
+            requester_user_id=state["context"]["user_id"],
+            requester_role=state["context"]["role"],
+            status_filter="open",
+        )
+        matched = _match_task_from_message(quoted, visible)
+        if matched is not None:
+            params = {**params, "task_reference": matched.title}
+    if not params.get("task_reference") and not has_changes:
         return {
             "result": {"edited": False, "reason": "missing_params"},
             "reply": (

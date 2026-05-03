@@ -273,6 +273,7 @@ def _build_system_prompt(
         "- Exemplos de task_status: 'Leo já fez o deploy?', 'como está a tarefa da Nanocare?', 'o que o Leo tem pendente?', 'tarefas do Leo', 'status do deploy', 'a Nanocare está pendente?'",
         "- Em task_status, use status_filter='open' para pendências e status_filter='all' para perguntas do tipo 'já fez?', 'já terminou?', 'como está?'",
         "- 'feito', 'já finalizei', 'terminei', 'concluí', 'já entreguei', 'pronto, finalizei', 'finalizei essa tarefa', 'finalizei isso', 'terminei essa', 'essa tarefa foi feita' = complete_task (NÃO start_task); task_reference vazio quando a referência for demonstrativo ('essa tarefa', 'isso', 'ela', 'esta') — deixe o sistema resolver pelo contexto da mensagem citada",
+        "- Em reschedule_task, cancel_task e edit_task: task_reference VAZIO quando a referência for demonstrativo ('essa tarefa', 'isso', 'ela', 'esta', 'desta tarefa', 'aquela tarefa') — o sistema resolve pelo corpo da mensagem citada; NÃO popule task_reference pelo histórico da conversa quando o usuário usou um demonstrativo na mensagem atual",
         "- 'quais as tarefas que eu finalizei', 'o que eu terminei', 'o que eu já finalizei', 'tarefas que eu finalizei', 'me mostra o que já fiz' = list_my_tasks com filter='done'",
         "- Para nomes do time, aceite variações de transcrição próximas: 'Mateus' pode ser 'Matheus' se houver um Matheus nos membros",
         "- O responsável pode aparecer no começo, meio ou fim: 'Matheus, ...', 'quero que o Matheus ...', 'passa para o Matheus ...', 'essa tarefa é para o Matheus'; preencha assignee_name quando houver um membro claro",
@@ -833,11 +834,12 @@ def _parse_locally(message: str) -> ParsedCommand:
         )
 
     if _contains_command_word(text, ["reagendar", "remarcar"]):
+        _ref = _strip_demonstrative_ref(_after_any(text, ["reagendar", "remarcar"]))
         return ParsedCommand(
             intent=Intent.command,
             action=Action.reschedule_task,
             params={
-                "task_reference": _after_any(text, ["reagendar", "remarcar"]),
+                **( {"task_reference": _ref} if _ref else {} ),
                 "due_date": _guess_due_date(text),
             },
             confidence=65,
@@ -1125,7 +1127,8 @@ def _detect_cancel_task_params(text: str) -> dict | None:
     if not matched_marker:
         return None
     reference = text.split(matched_marker, 1)[1].strip(" .,;:")
-    return {"task_reference": _normalize_task_title(reference) if len(reference) >= 3 else None}
+    task_ref = _strip_demonstrative_ref(_normalize_task_title(reference) if len(reference) >= 3 else None)
+    return {"task_reference": task_ref}
 
 
 def _detect_clear_due_date_params(text: str) -> dict | None:
@@ -1151,7 +1154,7 @@ def _detect_clear_due_date_params(text: str) -> dict | None:
     remainder = text.split(matched_marker, 1)[1].strip()
     # strip prepositions before the task reference
     remainder = re.sub(r"^(?:da|do|de|na|no)\s+(?:tarefa\s+)?", "", remainder).strip(" .,;:")
-    reference = _normalize_task_title(remainder) if len(remainder) >= 3 else None
+    reference = _strip_demonstrative_ref(_normalize_task_title(remainder) if len(remainder) >= 3 else None)
     return {"task_reference": reference}
 
 
@@ -1239,8 +1242,9 @@ def _detect_due_update_params(text: str) -> dict | None:
     reference = _strip_due_and_priority(reference)
     reference = re.sub(r"\b(?:nessa|nesta|nessa tarefa|nesta tarefa|para|pra|pro|a|o|da|do|de)\b", " ", reference)
     reference = re.sub(r"\s+", " ", reference).strip(" .,;:")
+    task_ref = _strip_demonstrative_ref(_normalize_task_title(reference) if len(reference) >= 3 else None)
     return {
-        "task_reference": _normalize_task_title(reference) if len(reference) >= 3 else None,
+        "task_reference": task_ref,
         "due_date": due_date,
     }
 
@@ -1846,6 +1850,23 @@ def _leading_assignee_candidate(text: str) -> str | None:
 
 def _strip_task_pronoun(value: str) -> str:
     return re.sub(r"^(?:de|me|pra mim|para mim|eu preciso|preciso)\s+", "", value).strip()
+
+
+_DEMONSTRATIVE_REFS = {
+    "essa tarefa", "essa", "isso", "ela", "este", "esta", "aqui",
+    "a tarefa", "desta tarefa", "aquela tarefa", "aquela",
+    "nessa tarefa", "nesta tarefa", "disso",
+}
+
+
+def _strip_demonstrative_ref(value: str | None) -> str | None:
+    """Return None when the task reference is a demonstrative pronoun, not a real title."""
+    if not value:
+        return None
+    cleaned = value.strip()
+    if cleaned.lower() in _DEMONSTRATIVE_REFS:
+        return None
+    return cleaned
 
 
 def _strip_trailing_filler(value: str) -> str:
