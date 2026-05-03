@@ -284,6 +284,12 @@ def _build_system_prompt(
         "- Título da tarefa: capitalize corretamente, não inclua data/hora no título",
         "- Confidence: 95=explícito e inequívoco, 85=implícito mas claro, 70=provável, 50=ambíguo",
         "",
+        "FILLERS CONVERSACIONAIS EM ÁUDIOS — IGNORE COMPLETAMENTE:",
+        "- Frases de confirmação no FINAL de mensagens de voz NÃO são a tarefa: 'tá bom?', 'ta bom?', 'ok?', 'certo?', 'né?', 'né não?', 'pode ser?', 'beleza?', 'pode?', 'tudo bem?', 'combinado?', 'tá?', 'sim?', 'correto?'",
+        "- Frases introdutórias NÃO são a tarefa: 'lembra de', 'lembrar de', 'não esquece de', 'não esquece que', 'pode fazer', 'preciso que você', 'quero que você'",
+        "- O título deve ser APENAS a ação concreta: verbo + objeto + contexto relevante",
+        "- NUNCA use o filler de confirmação como título, mesmo que seja a última coisa dita na mensagem",
+        "",
         "RESOLUÇÃO DE HORÁRIOS COLOQUIAIS (muito comum em áudios):",
         "- 'fim do dia' / 'final do dia' / 'fim da tarde' → 18:00",
         "- 'de manhã' / 'pela manhã' / 'cedo' → 09:00",
@@ -298,6 +304,8 @@ def _build_system_prompt(
         '- "Lembrar o Leo de enviar a proposta da Nanocare até amanhã" = create_task; assignee_name=Leo, client_name=Nanocare, due_date=amanhã',
         '- "Mateus, ajustar o Delega AI para receber um contato e salvar no time" = create_task; contato/time fazem parte da tarefa',
         '- "Matheus, quero que você dê uma olhadinha nas tasks da Derry para entender o que está pendente" = create_task; client_name="Derry"; due_date=null',
+        '- "Leo, lembra de amanhã dar uma olhada no código da SpaceX para ver ali os bugs que eles sinalizaram, tá bom?" = create_task; title="Dar uma olhada no código da SpaceX"; assignee_name="Leo"; client_name="SpaceX"; IGNORAR "tá bom?" — é filler conversacional de confirmação, NÃO é o título',
+        '- "João, pode conferir o contrato da Nanocare até sexta, certo?" = create_task; title="Conferir o contrato da Nanocare"; assignee_name="João"; client_name="Nanocare"; IGNORAR "certo?" — é filler',
         '- "quero convidar um colaborador" = action=null se faltam nome/telefone; explique depois no fallback',
         '- "compartilhei um contato" em texto comum = action=null; contato compartilhado real vem pelo evento contactMessage',
         "",
@@ -1458,6 +1466,7 @@ def _clean_task_title(text: str, client_name: str | None = None) -> str:
     ])
     title = title.strip(" ,.")
     title = _strip_task_pronoun(title)
+    title = _strip_trailing_filler(title)
     return _normalize_task_title(title) or text
 
 
@@ -1837,6 +1846,30 @@ def _leading_assignee_candidate(text: str) -> str | None:
 
 def _strip_task_pronoun(value: str) -> str:
     return re.sub(r"^(?:de|me|pra mim|para mim|eu preciso|preciso)\s+", "", value).strip()
+
+
+def _strip_trailing_filler(value: str) -> str:
+    """Remove conversational confirmation fillers from the end of a task title."""
+    fillers = [
+        r",?\s*ta\s+bom\??$",
+        r",?\s*tudo\s+bem\??$",
+        r",?\s*tudo\s+certo\??$",
+        r",?\s*pode\s+ser\??$",
+        r",?\s*ne\s+nao\??$",
+        r",?\s*ne\??$",
+        r",?\s*nao\s+e\??$",
+        r",?\s*certo\??$",
+        r",?\s*ok\??$",
+        r",?\s*beleza\??$",
+        r",?\s*combinado\??$",
+        r",?\s*pode\??$",
+        r",?\s*sim\??$",
+        r",?\s*correto\??$",
+    ]
+    cleaned = value
+    for pattern in fillers:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip(" ,.")
+    return cleaned
 
 
 def _title_ascii_name(value: str) -> str:
