@@ -457,6 +457,12 @@ def execute_reschedule_task(state: AgentState) -> AgentState:
                 "result": {"rescheduled": False, "reason": "no_visible_tasks"},
                 "reply": "Não encontrei tarefas abertas para atualizar o prazo.",
             }
+        # User replied directly to a bot notification — resolve task from quoted body
+        quoted = state.get("quoted_message_body")
+        if quoted and len(tasks) > 1:
+            matched = _match_task_from_message(quoted, tasks)
+            if matched is not None:
+                tasks = [matched]
         if len(tasks) == 1 and due_at_raw:
             due_at = datetime.fromisoformat(due_at_raw.replace("Z", "+00:00"))
             updated = store.reschedule_task_by_id(
