@@ -483,6 +483,14 @@ def _sanitize_llm_parsed(parsed: ParsedCommand) -> ParsedCommand:
             status_filter = "open"
         params["status_filter"] = status_filter
 
+    # Strip demonstrative task references ("essa tarefa", "isso", etc.) so execute nodes
+    # can rely on empty task_reference to trigger quoted_message_body resolution.
+    if parsed.action in {
+        Action.reschedule_task, Action.cancel_task, Action.edit_task,
+        Action.complete_task, Action.start_task,
+    }:
+        params["task_reference"] = _strip_demonstrative_ref(params.get("task_reference"))
+
     if parsed.action == Action.invite_user and params.get("phone"):
         params["phone"] = _normalize_phone(str(params["phone"]))
     if parsed.action == Action.invite_user and not params.get("phone"):
