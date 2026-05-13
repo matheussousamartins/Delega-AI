@@ -54,6 +54,17 @@ def test_evolution_webhook_requires_secret_configuration_in_production(monkeypat
     assert response.json()["detail"] == "evolution_webhook_secret_not_configured"
 
 
+def test_evolution_webhook_accepts_secret_from_query_string(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "evolution_webhook_secret", "query-secret")
+    client = TestClient(app)
+
+    response = client.post("/webhooks/evolution?apikey=query-secret", json={})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+
+
 def test_manual_whatsapp_webhook_requires_observe_key(monkeypatch) -> None:
     monkeypatch.setattr(settings, "observe_api_key", None)
     client = TestClient(app)

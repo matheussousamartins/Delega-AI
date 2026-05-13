@@ -47,7 +47,11 @@ async def _verify_evolution_webhook(
             )
         return
 
-    token = apikey or request.headers.get("authorization", "").removeprefix("Bearer ")
+    token = (
+        apikey
+        or request.headers.get("authorization", "").removeprefix("Bearer ")
+        or request.query_params.get("apikey")
+    )
     if not token or not hmac.compare_digest(token, secret):
         raise HTTPException(status_code=401, detail="invalid_webhook_secret")
 
