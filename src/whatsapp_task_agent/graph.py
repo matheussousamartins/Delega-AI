@@ -622,20 +622,41 @@ def execute_invite_user(state: AgentState) -> AgentState:
 
 def execute_edit_member(state: AgentState) -> AgentState:
     context = state["context"]
-    if context["role"] not in ("owner", "admin", "manager"):
-        return {
-            "result": {"edited": False, "reason": "permission_denied"},
-            "reply": "Só gestores e administradores podem renomear colaboradores.",
-        }
-
     params = state["parsed"].params
     current_name = params.get("current_name")
     new_name = params.get("new_name")
+    new_job_title = params.get("new_job_title")
+    target_self = params.get("target_self") is True
+
+    if new_job_title:
+        target_id = context["user_id"] if target_self else store.find_user_by_name(context["company_id"], current_name)
+        target_name = context["user_name"] if target_self else current_name
+        if target_id is None:
+            return {
+                "result": {"edited": False, "reason": "member_not_found", "current_name": current_name},
+                "reply": f"Não encontrei {current_name or 'essa pessoa'} no time.",
+            }
+
+        updated = store.update_member_job_title(context["company_id"], str(target_id), new_job_title)
+        if not updated:
+            return {
+                "result": {"edited": False, "reason": "update_failed"},
+                "reply": "Não consegui atualizar o cargo. Tente novamente.",
+            }
+
+        return {
+            "result": {"edited": True, "member_name": target_name, "new_job_title": new_job_title},
+            "reply": f"💼 Cargo atualizado.\n\n{target_name}: {new_job_title}",
+        }
 
     if not current_name or not new_name:
         return {
             "result": {"edited": False, "reason": "missing_params"},
-            "reply": "Para renomear um colaborador, diga o nome atual e o novo nome. Exemplo: muda o nome do Leo para Leonardo.",
+            "reply": (
+                "Para renomear um colaborador, diga o nome atual e o novo nome. "
+                "Exemplo: muda o nome do Leo para Leonardo.\n\n"
+                "Para alterar cargo, diga: alterar cargo do Leo para Desenvolvedor."
+            ),
         }
 
     target_id = store.find_user_by_name(context["company_id"], current_name)
@@ -658,6 +679,11 @@ def execute_edit_member(state: AgentState) -> AgentState:
     }
 
 
+def execute_edit_client(state: AgentState) -> AgentState:
+    result = tools.edit_client(state["context"], state["parsed"].params)
+    return {"result": result, "reply": _format_edit_client(result)}
+
+
 def complete_pending_invite_draft(state: AgentState) -> AgentState:
     context = state["context"]
     draft = store.get_pending_invite_draft(context["company_id"], context["user_id"])
@@ -668,6 +694,26 @@ def complete_pending_invite_draft(state: AgentState) -> AgentState:
             "reply": "Não encontrei um convite em andamento. Para convidar alguém, compartilhe o contato aqui na conversa.",
         }
 
+    params = dict(draft["params"])
+    name_update = _extract_invite_contact_name_update(state["message"])
+    if name_update:
+        params["name"] = name_update
+        store.save_pending_invite_draft(
+            context["company_id"],
+            context["user_id"],
+            params,
+            ttl_minutes=settings.pending_invite_ttl_hours * 60,
+        )
+        return {
+            "parsed": parsed,
+            "result": {"invite_draft": True, "params": params},
+            "reply": (
+                f"✅ Nome do contato atualizado para {name_update}.\n\n"
+                "💼 Qual será o cargo ou função dessa pessoa no time?\n"
+                "Exemplos: Desenvolvedor, Gestor Comercial, CEO."
+            ),
+        }
+
     job_title = _extract_invite_job_title(state["message"])
     if not job_title:
         return {
@@ -675,7 +721,6 @@ def complete_pending_invite_draft(state: AgentState) -> AgentState:
             "reply": "Qual será o cargo ou função dessa pessoa no time? Exemplo: Desenvolvedor, Gestor Comercial, CEO.",
         }
 
-    params = dict(draft["params"])
     params["job_title"] = job_title
     store.clear_pending_invite_draft(context["company_id"], context["user_id"])
     result = tools.invite_user(context, params)
@@ -764,10 +809,10 @@ def handle_onboarding(state: AgentState) -> AgentState:
         return {
             "parsed": parsed,
             "reply": (
-                "Bem-vindo ao Delega AI.\n\n"
-                "Você pode delegar tarefas por texto ou áudio. "
+                "👋 Bem-vindo ao Delega AI.\n\n"
+                "🎙️ Você pode delegar tarefas por texto ou áudio. "
                 "Vou configurar seu espaço de trabalho rapidamente.\n\n"
-                "Qual é o nome da sua empresa?"
+                "🏢 Qual é o nome da sua empresa?"
             ),
         }
 
@@ -776,7 +821,7 @@ def handle_onboarding(state: AgentState) -> AgentState:
         if not _is_valid_onboarding_value(value):
             return {
                 "parsed": parsed,
-                "reply": "Qual é o nome da sua empresa? Pode falar ou digitar.",
+                "reply": "🏢 Qual é o nome da sua empresa? Pode falar ou digitar.",
             }
         store.update_onboarding_session(
             state["from_phone"],
@@ -786,17 +831,32 @@ def handle_onboarding(state: AgentState) -> AgentState:
         return {
             "parsed": parsed,
             "reply": (
-                f"Perfeito. Espaço criado para {value}.\n\n"
-                "Agora me diga seu nome completo."
+                f"✅ Perfeito. Espaço criado para {value}.\n\n"
+                "👤 Agora me diga seu nome completo."
             ),
         }
 
     if session["step"] == "user_name":
+        company_name_update = _extract_company_name_update(raw_message)
+        if company_name_update:
+            store.update_onboarding_session(
+                state["from_phone"],
+                company_name=company_name_update,
+                step="user_name",
+            )
+            return {
+                "parsed": parsed,
+                "reply": (
+                    f"✅ Nome da empresa atualizado para {company_name_update}.\n\n"
+                    "👤 Agora me diga seu nome completo."
+                ),
+            }
+
         value = extract_onboarding_value("user_name", raw_message) or raw_message
         if not _is_valid_onboarding_value(value):
             return {
                 "parsed": parsed,
-                "reply": "Qual é o seu nome completo?",
+                "reply": "👤 Qual é o seu nome completo?",
             }
         store.update_onboarding_session(
             state["from_phone"],
@@ -806,8 +866,8 @@ def handle_onboarding(state: AgentState) -> AgentState:
         return {
             "parsed": parsed,
             "reply": (
-                f"Prazer, {value}.\n\n"
-                "Qual é o seu cargo? Exemplo: CEO, Gerente Comercial, Desenvolvedor."
+                f"Prazer, {value}. 👋\n\n"
+                "💼 Qual é o seu cargo? Exemplo: CEO, Gerente Comercial, Desenvolvedor."
             ),
         }
 
@@ -816,7 +876,7 @@ def handle_onboarding(state: AgentState) -> AgentState:
         if not _is_valid_onboarding_value(value):
             return {
                 "parsed": parsed,
-                "reply": "Qual é o seu cargo? Exemplo: CEO, Gerente, Desenvolvedor.",
+                "reply": "💼 Qual é o seu cargo? Exemplo: CEO, Gerente, Desenvolvedor.",
             }
         store.update_onboarding_session(
             state["from_phone"],
@@ -835,19 +895,19 @@ def handle_onboarding(state: AgentState) -> AgentState:
             "parsed": parsed,
             "result": {"onboarding_completed": True, **context},
             "reply": (
-                f"Tudo pronto, {context['user_name']}.\n\n"
-                f"Empresa: {context['company_name']}\n"
-                f"Perfil: {context['job_title']}\n\n"
-                "Agora você pode delegar tarefas por texto ou áudio. "
+                f"✅ Tudo pronto, {context['user_name']}.\n\n"
+                f"🏢 Empresa: {context['company_name']}\n"
+                f"💼 Perfil: {context['job_title']}\n\n"
+                "🎙️ Agora você pode delegar tarefas por texto ou áudio. "
                 "Pode falar naturalmente; eu organizo responsável, tarefa e prazo.\n\n"
-                "Para convidar alguém, compartilhe o contato aqui na conversa ou diga: quero convidar uma pessoa.\n"
-                "Exemplo: Leo, ajustar o relatório comercial até amanhã às 10h."
+                "👥 Para convidar alguém, compartilhe o contato aqui na conversa ou diga: quero convidar uma pessoa.\n\n"
+                "📌 Exemplo de como delegar tarefas: Leo, ajustar o relatório comercial até amanhã às 10h."
             ),
         }
 
     return {
         "parsed": parsed,
-        "reply": "Vamos continuar seu cadastro. Me envie a proxima informacao solicitada.",
+        "reply": "📝 Vamos continuar seu cadastro. Me envie a proxima informacao solicitada.",
     }
 
 
@@ -1233,7 +1293,7 @@ def format_reply(state: AgentState) -> AgentState:
                     + "\n\nResponda com o numero da tarefa que voce quer concluir."
                 )
             }
-        return {"reply": f"Tarefa concluída.\n\nTarefa: {result['title']}"}
+        return {"reply": f"✅ Tarefa concluída.\n\n📌 Tarefa: {result['title']}"}
 
     if action == Action.start_task:
         if not result.get("found"):
@@ -1247,7 +1307,7 @@ def format_reply(state: AgentState) -> AgentState:
                     + "\n\nResponda com o numero da tarefa que voce quer marcar como em andamento."
                 )
             }
-        return {"reply": f"Tarefa marcada como em andamento.\n\nTarefa: {result['title']}"}
+        return {"reply": f"🔄 Tarefa marcada como em andamento.\n\n📌 Tarefa: {result['title']}"}
 
     if action == Action.cancel_task:
         if result.get("reason") == "permission_denied":
@@ -1263,7 +1323,7 @@ def format_reply(state: AgentState) -> AgentState:
             }
         if not result.get("cancelled"):
             return {"reply": "Não encontrei essa tarefa entre as suas tarefas visíveis."}
-        return {"reply": f"Tarefa cancelada.\n\nTarefa: {result['title']}"}
+        return {"reply": f"❌ Tarefa cancelada.\n\n📌 Tarefa: {result['title']}"}
 
     if action == Action.reschedule_task and result.get("task_update_type") == "due_date_cleared":
         if result.get("reason") == "permission_denied":
@@ -1279,7 +1339,7 @@ def format_reply(state: AgentState) -> AgentState:
             }
         if not result.get("cleared"):
             return {"reply": "Não encontrei essa tarefa entre as suas tarefas visíveis."}
-        return {"reply": f"Prazo removido.\n\nTarefa: {result['title']}\nPrazo: sem prazo"}
+        return {"reply": f"✅ Prazo removido.\n\n📌 Tarefa: {result['title']}\n⏰ Prazo: sem prazo"}
 
     if action == Action.edit_task:
         if result.get("reason") == "ambiguous":
@@ -1309,9 +1369,9 @@ def format_reply(state: AgentState) -> AgentState:
             return {"reply": "Não consegui reagendar. Preciso identificar a tarefa e a nova data."}
         return {
             "reply": (
-                "Tarefa reagendada.\n\n"
-                f"Tarefa: {result['title']}\n"
-                f"Novo prazo: {_format_due_at(result.get('due_at'))}"
+                "🔁 Tarefa reagendada.\n\n"
+                f"📌 Tarefa: {result['title']}\n"
+                f"⏰ Novo prazo: {_format_due_at(result.get('due_at'))}"
             )
         }
 
@@ -1343,28 +1403,28 @@ def _format_created_task(result: dict) -> str:
 
     assignee = result.get("assignee_name") or "responsável"
     lines = [
-        f"Tarefa criada e enviada para {assignee}.",
+        f"✅ Tarefa criada e enviada para {assignee}.",
         "",
-        f"Tarefa: {result['title']}",
+        f"📌 Tarefa: {result['title']}",
     ]
     if result.get("assignee_name"):
-        lines.append(f"Responsável: {result['assignee_name']}")
+        lines.append(f"👤 Responsável: {result['assignee_name']}")
     if result.get("client_name"):
-        lines.append(f"Cliente: {result['client_name']}")
-    lines.append(f"Prazo: {_format_due_at(result.get('due_at'))}")
+        lines.append(f"🏢 Cliente: {result['client_name']}")
+    lines.append(f"⏰ Prazo: {_format_due_at(result.get('due_at'))}")
     lines.append("Status: enviada")
     lines.extend(["", "Vou acompanhar e te aviso quando houver atualização."])
     return "\n".join(lines)
 
 def _format_created_self_task(result: dict) -> str:
     lines = [
-        "Tarefa criada para você.",
+        "✅ Tarefa criada para você.",
         "",
-        f"Tarefa: {result['title']}",
+        f"📌 Tarefa: {result['title']}",
     ]
     if result.get("client_name"):
-        lines.append(f"Cliente: {result['client_name']}")
-    lines.append(f"Prazo: {_format_due_at(result.get('due_at'))}")
+        lines.append(f"🏢 Cliente: {result['client_name']}")
+    lines.append(f"⏰ Prazo: {_format_due_at(result.get('due_at'))}")
     lines.append("Status: pendente")
     lines.extend(["", "Fica na sua lista de pendências."])
     return "\n".join(lines)
@@ -1385,17 +1445,16 @@ def _format_my_tasks_reply(result: dict, params: dict) -> str:
     page = result.get("page", 1)
     task_filter = result.get("filter", "pending")
     client_name = result.get("client_name")
-    is_done = task_filter == "done"
 
     if view == "delegated":
         if not delegated_list:
             return _format_empty_task_list(result, params)
         offset = (page - 1) * 10
-        if is_done:
-            header = f"Tarefas delegadas concluídas — {client_name}:" if client_name else "Tarefas delegadas concluídas:"
-        else:
-            header = f"Tarefas que você delegou — {client_name}:" if client_name else "Tarefas que você delegou:"
-        lines = [f"{offset + i}. {_format_task_line(t)}" for i, t in enumerate(delegated_list, start=1)]
+        header = _format_task_list_header("delegated", task_filter, client_name)
+        lines = [
+            f"{offset + i}. {_format_task_list_item(t, show_assignee=True)}"
+            for i, t in enumerate(delegated_list, start=1)
+        ]
         body = f"{header}\n\n" + "\n".join(lines)
         if result.get("has_more"):
             body += "\n\nPara ver mais, responda: próximas tarefas"
@@ -1407,18 +1466,18 @@ def _format_my_tasks_reply(result: dict, params: dict) -> str:
         sections = []
         offset = (page - 1) * 10
         if tasks_list:
-            if is_done:
-                my_header = f"Suas tarefas concluídas — {client_name}:" if client_name else "Suas tarefas concluídas:"
-            else:
-                my_header = f"Suas tarefas abertas — {client_name}:" if client_name else "Suas tarefas abertas:"
-            my_lines = [f"{offset + i}. {_format_task_line(t)}" for i, t in enumerate(tasks_list, start=1)]
+            my_header = _format_task_list_header("my", task_filter, client_name)
+            my_lines = [
+                f"{offset + i}. {_format_task_list_item(t, show_assignee=False)}"
+                for i, t in enumerate(tasks_list, start=1)
+            ]
             sections.append(f"{my_header}\n\n" + "\n".join(my_lines))
         if delegated_list:
-            if is_done:
-                del_header = f"Tarefas delegadas concluídas — {client_name}:" if client_name else "Tarefas delegadas concluídas:"
-            else:
-                del_header = f"Tarefas que você delegou — {client_name}:" if client_name else "Tarefas que você delegou:"
-            del_lines = [f"{offset + i}. {_format_task_line(t)}" for i, t in enumerate(delegated_list, start=1)]
+            del_header = _format_task_list_header("delegated", task_filter, client_name)
+            del_lines = [
+                f"{offset + i}. {_format_task_list_item(t, show_assignee=True)}"
+                for i, t in enumerate(delegated_list, start=1)
+            ]
             sections.append(f"{del_header}\n\n" + "\n".join(del_lines))
         body = "\n\n".join(sections)
         if result.get("has_more"):
@@ -1429,21 +1488,99 @@ def _format_my_tasks_reply(result: dict, params: dict) -> str:
         return _format_empty_task_list(result, params)
 
     offset = (page - 1) * 10
-    if is_done:
-        header = f"Suas tarefas concluídas — {client_name}:" if client_name else "Suas tarefas concluídas:"
-    else:
-        header = f"Suas tarefas abertas — {client_name}:" if client_name else "Suas tarefas abertas:"
-    lines = [f"{offset + i}. {_format_task_line(t)}" for i, t in enumerate(tasks_list, start=1)]
+    header = _format_task_list_header("my", task_filter, client_name)
+    lines = [
+        f"{offset + i}. {_format_task_list_item(t, show_assignee=False)}"
+        for i, t in enumerate(tasks_list, start=1)
+    ]
     body = f"{header}\n\n" + "\n".join(lines)
     if result.get("has_more"):
         body += "\n\nPara ver mais, responda: próximas tarefas"
     return body
 
 
+def _format_task_list_header(kind: str, task_filter: str, client_name: str | None) -> str:
+    if kind == "delegated":
+        title = "Tarefas delegadas concluídas" if task_filter == "done" else "Tarefas que você delegou"
+        header = f"📤 {title}"
+    else:
+        if task_filter == "done":
+            title = "Suas tarefas concluídas"
+        elif task_filter == "all":
+            title = "Suas tarefas"
+        else:
+            title = "Suas tarefas abertas"
+        header = f"📋 {title}"
+    if client_name:
+        header += f" - {client_name}"
+    return header
+
+
+def _format_task_list_item(task: dict, show_assignee: bool) -> str:
+    lines = [task["title"]]
+    details = []
+    if show_assignee and task.get("assignee_name"):
+        details.append(f"Responsável: {task['assignee_name']}")
+    if task.get("client_name"):
+        details.append(f"Cliente: {task['client_name']}")
+    if task.get("status") == "done" and task.get("completed_at"):
+        details.append(f"Concluída em: {_format_list_datetime(task['completed_at'])}")
+    else:
+        details.append(f"Prazo: {_format_list_datetime(task.get('due_at'))}")
+    details.append(f"Status: {_format_task_status(task.get('status'))}")
+    lines.extend(f"   {detail}" for detail in details)
+    return "\n".join(lines)
+
+
+def _format_list_datetime(value: str | None) -> str:
+    if not value:
+        return "sem prazo"
+    try:
+        due_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if due_at.tzinfo is not None:
+        due_at = due_at.astimezone(APP_TIMEZONE)
+    today = datetime.now(APP_TIMEZONE).date()
+    due_date = due_at.date()
+    if due_date == today:
+        prefix = "hoje"
+    elif (due_date - today).days == 1:
+        prefix = "amanhã"
+    else:
+        prefix = due_at.strftime("%d/%m")
+    return f"{prefix} às {due_at.strftime('%H:%M')}"
+
+
 def _format_edited_task(result: dict) -> str:
-    lines = ["Tarefa atualizada.", "", f"Tarefa: {result['title']}"]
+    lines = ["✅ Tarefa atualizada.", "", f"📌 Tarefa: {result['title']}"]
     if result.get("assignee_name"):
-        lines.append(f"Responsável: {result['assignee_name']}")
+        lines.append(f"👤 Responsável: {result['assignee_name']}")
+    if result.get("client_name"):
+        lines.append(f"🏢 Cliente: {result['client_name']}")
+    return "\n".join(lines)
+
+
+def _format_edit_client(result: dict) -> str:
+    if result.get("reason") == "permission_denied":
+        return "Só gestores e administradores podem renomear clientes."
+    if result.get("reason") == "missing_params":
+        return "Para renomear um cliente, diga o nome atual e o novo nome. Exemplo: renomear cliente Derry para Dairy."
+    if result.get("reason") == "client_not_found":
+        return f"Não encontrei o cliente {result.get('current_name', 'informado')}."
+    if not result.get("renamed"):
+        return "Não consegui atualizar esse cliente. Tente novamente."
+
+    affected_tasks = result.get("affected_tasks", 0)
+    task_word = "tarefa atualizada" if affected_tasks == 1 else "tarefas atualizadas"
+    lines = [
+        "✅ Cliente atualizado.",
+        "",
+        f"🏢 {result['old_name']} → {result['new_name']}",
+        f"{affected_tasks} {task_word}.",
+    ]
+    if result.get("merged"):
+        lines.append("Também unifiquei com o cliente que já existia com esse nome.")
     return "\n".join(lines)
 
 
@@ -1451,6 +1588,17 @@ def _format_empty_task_list(result: dict, params: dict) -> str:
     task_filter = result.get("filter") or params.get("filter", "pending")
     client_name = result.get("client_name")
     client_suffix = f" para {client_name}" if client_name else ""
+    view = result.get("view") or params.get("view", "my")
+    if view == "delegated":
+        if task_filter == "done":
+            return f"Você ainda não tem tarefas delegadas concluídas{client_suffix}."
+        if task_filter == "overdue":
+            return "Você não tem tarefas delegadas atrasadas agora."
+        if task_filter == "today":
+            return "Você não tem tarefas delegadas para hoje."
+        if task_filter == "date":
+            return "Você não tem tarefas delegadas para essa data."
+        return f"Você não tem tarefas delegadas pendentes agora{client_suffix}."
     if task_filter == "done":
         return f"Você ainda não concluiu nenhuma tarefa{client_suffix}."
     if task_filter == "overdue":
@@ -1482,14 +1630,14 @@ def _format_task_status_query(result: dict) -> str:
 
     if len(tasks) == 1:
         task = tasks[0]
-        lines = ["Status da tarefa", "", f"Tarefa: {task['title']}"]
+        lines = ["📌 Status da tarefa", "", f"Tarefa: {task['title']}"]
         if task.get("assignee_name"):
-            lines.append(f"Responsável: {task['assignee_name']}")
+            lines.append(f"👤 Responsável: {task['assignee_name']}")
         if task.get("created_by_name"):
-            lines.append(f"Criada por: {task['created_by_name']}")
+            lines.append(f"👤 Criada por: {task['created_by_name']}")
         if task.get("client_name"):
-            lines.append(f"Cliente: {task['client_name']}")
-        lines.append(f"Prazo: {_format_due_at(task.get('due_at'))}")
+            lines.append(f"🏢 Cliente: {task['client_name']}")
+        lines.append(f"⏰ Prazo: {_format_due_at(task.get('due_at'))}")
         lines.append(f"Status: {_format_task_status(task.get('status'))}")
         if task.get("completed_at"):
             lines.append(f"Concluída em: {_format_due_at(task.get('completed_at'))}")
@@ -1536,20 +1684,20 @@ def _format_team_summary(result: dict) -> str:
         )
 
     lines = [
-        "Resumo do time",
+        "📊 Resumo do time",
         "",
         f"Pendentes: {result.get('pending', 0)}",
         f"Concluídas: {result.get('done', 0)}",
         f"Atrasadas: {result.get('overdue', 0)}",
     ]
     if result.get("overdue_tasks"):
-        lines.extend(["", "Atrasadas"])
+        lines.extend(["", "⚠️ Atrasadas"])
         lines.extend(_format_team_task_lines(result["overdue_tasks"][:3]))
     if result.get("pending_tasks"):
-        lines.extend(["", "Próximas pendentes"])
+        lines.extend(["", "📌 Próximas pendentes"])
         lines.extend(_format_team_task_lines(result["pending_tasks"][:3]))
     if result.get("done_today_tasks"):
-        lines.extend(["", "Concluídas hoje"])
+        lines.extend(["", "✅ Concluídas hoje"])
         lines.extend(_format_team_task_lines(result["done_today_tasks"][:3], use_completed_at=True))
     lines.extend(["", "Para detalhar, diga: tarefas do time, atrasadas do time ou concluídas hoje."])
     return "\n".join(lines)
@@ -1575,14 +1723,14 @@ def _format_team_task_lines(tasks: list[dict], use_completed_at: bool = False) -
 
 def _format_missing_due_date(params: dict) -> str:
     lines = [
-        "Entendi a tarefa, mas preciso confirmar o prazo.",
+        "⏰ Entendi a tarefa, mas preciso confirmar o prazo.",
         "",
-        f"Tarefa: {params.get('title', 'Tarefa')}",
+        f"📌 Tarefa: {params.get('title', 'Tarefa')}",
     ]
     if params.get("assignee_name"):
-        lines.append(f"Responsável: {params['assignee_name']}")
+        lines.append(f"👤 Responsável: {params['assignee_name']}")
     if params.get("client_name"):
-        lines.append(f"Cliente: {params['client_name']}")
+        lines.append(f"🏢 Cliente: {params['client_name']}")
     lines.extend(
         [
             "",
@@ -1651,6 +1799,8 @@ def _format_contextual_fallback(message: str) -> str:
             "Quais tarefas voce quer ver?\n\n"
             "Voce pode responder:\n"
             "minhas tarefas\n"
+            "tarefas que deleguei\n"
+            "minhas tarefas e as que deleguei\n"
             "tarefas de hoje\n"
             "tarefas atrasadas\n"
             "tarefas para 04/05"
@@ -1697,7 +1847,7 @@ def _format_invite_missing_job_title(params: dict) -> str:
     name = params.get("name") or "essa pessoa"
     phone = params.get("phone")
     lines = [
-        f"Encontrei o contato do {name}.",
+        f"👤 Encontrei o contato do {name}.",
     ]
     if phone:
         lines.append(f"Telefone: {phone}")
@@ -1716,13 +1866,59 @@ def _extract_invite_job_title(message: str) -> str | None:
     no_role = {"sem cargo", "sem funcao", "sem função", "nao sei", "não sei"}
     if normalized in no_role:
         return "Colaborador"
-    value = extract_onboarding_value("job_title", message) or message
+    value = extract_onboarding_value("job_title", message)
+    if not value:
+        match = re.search(
+            r"\b(?:muda|mudar|altera|alterar|atualiza|atualizar|corrige|corrigir|troca|trocar)\s+(?:o\s+)?(?:cargo|funcao|função|perfil)\s+(?:para|pra|pro)\s+(.+)$",
+            normalized,
+        )
+        value = match.group(1) if match else message
     value = value.strip(" .,:;\n\t")
+    value = re.sub(r"\b(?:ok|certo|por favor|pfv|beleza|ta bom|tá bom)\b.*$", "", value).strip(" .,:;!?")
     if not _is_valid_onboarding_value(value):
         return None
     if _normalize_text(value) in {"aceitar", "sim", "ok", "pode", "manda", "enviar"}:
         return None
-    return value[:60]
+    return _title_invite_job_title(value[:60])
+
+
+def _extract_invite_contact_name_update(message: str) -> str | None:
+    normalized = _normalize_text(message)
+    patterns = [
+        r"\b(?:alterar|altera|mudar|muda|corrigir|corrige|trocar|troca|renomear|renomeia)\s+(?:o\s+)?nome\s+d[oa]\s+contato\s+(?:para|pra|pro)\s+(.+)$",
+        r"\b(?:alterar|altera|mudar|muda|corrigir|corrige|trocar|troca|renomear|renomeia)\s+(?:o\s+)?contato\s+(?:para|pra|pro)\s+(.+)$",
+        r"\b(?:nome\s+d[oa]\s+contato|contato)\s+(?:e|eh|é)\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        name = match.group(1).strip(" .,:;!?")
+        name = re.sub(r"\b(?:ok|certo|por favor|pfv|beleza|ta bom|tá bom)\b.*$", "", name).strip(" .,:;!?")
+        if len(name) >= 2:
+            return _title_invite_contact_name(name)
+    return None
+
+
+def _title_invite_contact_name(name: str) -> str:
+    return " ".join(part[:1].upper() + part[1:] for part in name.split())
+
+
+def _title_invite_job_title(value: str) -> str:
+    acronyms = {"ceo", "cto", "cfo", "coo", "ia", "ai", "rh", "ti", "ux", "ui"}
+    lowercase_words = {"de", "da", "do", "das", "dos", "e"}
+    words = []
+    for index, part in enumerate(value.split()):
+        normalized = _normalize_text(part)
+        if normalized in acronyms:
+            words.append(part.upper())
+        elif index > 0 and normalized in lowercase_words:
+            words.append(normalized)
+        else:
+            words.append(part[:1].upper() + part[1:])
+    return " ".join(words)
+
+
 def _format_invite_user(result: dict) -> str:
     if not result.get("invited"):
         if result.get("reason") == "permission_denied":
@@ -1734,7 +1930,7 @@ def _format_invite_user(result: dict) -> str:
         )
 
     lines = [
-        f"Convite enviado para {result['name']}.",
+        f"✅ Convite enviado para {result['name']}.",
         "",
         f"Telefone: {result['phone']}",
     ]
@@ -1747,11 +1943,11 @@ def _format_pending_invite(invite: dict) -> str:
     company_name = invite.get("company_name") or "sua empresa"
     inviter_name = invite.get("invited_by_name")
     lines = [
-        f"Você foi convidado para participar da {company_name} no Delega AI.",
+        f"🏢 Você foi convidado para participar da {company_name} no Delega AI.",
         "",
     ]
     if inviter_name:
-        lines.append(f"Convidado por: {inviter_name}")
+        lines.append(f"👤 Convidado por: {inviter_name}")
     if invite.get("name"):
         lines.append(f"Nome: {invite['name']}")
     if invite.get("job_title"):
@@ -1773,10 +1969,10 @@ def _format_invite_response_help(invite: dict) -> str:
     )
 def _format_invite_accepted(context: dict) -> str:
     lines = [
-        "Convite aceito.",
+        "✅ Convite aceito.",
         "",
-        f"Empresa: {context['company_name']}",
-        f"Usuário: {context['user_name']}",
+        f"🏢 Empresa: {context['company_name']}",
+        f"👤 Usuário: {context['user_name']}",
     ]
     if context.get("job_title"):
         lines.append(f"Cargo: {context['job_title']}")
@@ -1790,18 +1986,18 @@ def _format_invite_accepted(context: dict) -> str:
 
 def _format_task_line(task: dict) -> str:
     title = task["title"]
-    lines = [f"{title}"]
+    lines = [f"📌 {title}"]
     details = []
     if task.get("assignee_name"):
-        details.append(f"Responsável: {task['assignee_name']}")
+        details.append(f"👤 Responsável: {task['assignee_name']}")
     if task.get("created_by_name"):
-        details.append(f"Criada por: {task['created_by_name']}")
+        details.append(f"👤 Criada por: {task['created_by_name']}")
     if task.get("client_name"):
-        details.append(f"Cliente: {task['client_name']}")
+        details.append(f"🏢 Cliente: {task['client_name']}")
     if task.get("status") == "done" and task.get("completed_at"):
-        details.append(f"Concluída em: {_format_due_at(task['completed_at'])}")
+        details.append(f"✅ Concluída em: {_format_due_at(task['completed_at'])}")
     else:
-        details.append(f"Prazo: {_format_due_at(task.get('due_at'))}")
+        details.append(f"⏰ Prazo: {_format_due_at(task.get('due_at'))}")
     details.append(f"Status: {_format_task_status(task.get('status'))}")
     lines.extend(f"   {detail}" for detail in details)
     return "\n".join(lines)
@@ -1974,8 +2170,22 @@ def _task_matches(tasks: list) -> list[dict]:
             "client_name": getattr(task, "client_name", None) if hasattr(task, "client_name") else task.get("client_name"),
             "status": (task.status.value if hasattr(getattr(task, "status", None), "value") else getattr(task, "status", None)) if hasattr(task, "status") else task.get("status"),
         }
-        for task in sorted(tasks, key=lambda item: getattr(item, "due_at", None) or datetime.max)[:5]
+        for task in sorted(tasks, key=_task_due_sort_key)[:5]
     ]
+
+
+def _task_due_sort_key(task) -> datetime:
+    due_at = getattr(task, "due_at", None) if hasattr(task, "due_at") else task.get("due_at")
+    if not due_at:
+        return datetime.max
+    if isinstance(due_at, str):
+        try:
+            due_at = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.max
+    if due_at.tzinfo is not None:
+        due_at = due_at.astimezone(APP_TIMEZONE).replace(tzinfo=None)
+    return due_at
 
 
 def _match_task_from_message(message: str, tasks: list):
@@ -2209,6 +2419,24 @@ def _normalize_invite_response(message: str) -> str:
 def _normalize_short_answer(message: str) -> str:
     return _normalize_invite_response(message)
 
+
+def _extract_company_name_update(message: str) -> str | None:
+    text = _normalize_text(message)
+    patterns = [
+        r"\b(?:alterar|altera|mudar|muda|corrigir|corrige|trocar|troca)\s+(?:o\s+)?nome\s+d[ae]\s+empresa\s+(?:para|pra|pro)\s+(.+)$",
+        r"\b(?:alterar|altera|mudar|muda|corrigir|corrige|trocar|troca)\s+(?:a\s+)?empresa\s+(?:para|pra|pro)\s+(.+)$",
+        r"\b(?:nome\s+d[ae]\s+empresa|empresa)\s+(?:e|eh|é)\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1).strip(" .,:;!?")
+            value = re.sub(r"\b(?:ok|certo|por favor|pfv|beleza|ta bom|tá bom)\b.*$", "", value).strip(" .,:;!?")
+            if len(value) >= 2:
+                return value.title()
+    return None
+
+
 def _normalize_text(value: str) -> str:
     text = normalize("NFKD", value.lower().strip())
     return "".join(char for char in text if char.isascii())
@@ -2373,6 +2601,7 @@ def build_graph():
     graph.add_node("team_summary", execute_team_summary)
     graph.add_node("invite_user", execute_invite_user)
     graph.add_node("edit_member", execute_edit_member)
+    graph.add_node("edit_client", execute_edit_client)
     graph.add_node("resolve_pending_choice", execute_pending_choice)
     graph.add_node("complete_pending_invite_draft", complete_pending_invite_draft)
     graph.add_node("complete_pending_task_draft", complete_pending_task_draft)
@@ -2424,6 +2653,7 @@ def build_graph():
             "team_summary": "team_summary",
             "invite_user": "invite_user",
             "edit_member": "edit_member",
+            "edit_client": "edit_client",
             "acknowledge_task": "acknowledge_task",
             "handle_received_task_reply": "handle_received_task_reply",
             "fallback": "fallback",
@@ -2441,6 +2671,7 @@ def build_graph():
     graph.add_edge("team_summary", "format_reply")
     graph.add_edge("invite_user", "format_reply")
     graph.add_edge("edit_member", "format_reply")
+    graph.add_edge("edit_client", "format_reply")
     graph.add_edge("resolve_pending_choice", "format_reply")
     graph.add_edge("complete_pending_invite_draft", "format_reply")
     graph.add_edge("complete_pending_task_draft", "format_reply")

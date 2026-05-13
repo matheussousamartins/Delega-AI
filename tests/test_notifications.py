@@ -93,7 +93,7 @@ def test_invite_acceptance_notification_goes_to_inviter(monkeypatch) -> None:
         {
             "to_phone": "+5541999999999",
             "reply": (
-                "Luiz aceitou o convite e agora faz parte da Commandix.\n"
+                "✅ Luiz aceitou o convite e agora faz parte da Commandix.\n"
                 "Cargo: Desenvolvedor\n\n"
                 "Vocês já podem trocar delegações pelo Delega AI."
             ),

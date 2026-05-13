@@ -239,19 +239,25 @@ def _build_system_prompt(
         "8. invite_user — Convidar colaborador",
         "   Params: name, phone (apenas dígitos com DDD), job_title, role (member/manager)",
         "",
-        "9. edit_member — Renomear colaborador do time (owners/admins/managers apenas)",
-        "   Params: current_name* (nome atual), new_name* (novo nome)",
-        "   Triggers: 'muda o nome do Leo para Leonardo', 'renomeia a Ana para Ana Paula', 'o Leo na verdade se chama Leonardo'",
+        "9. edit_member — Renomear/corrigir colaborador do time ou atualizar cargo/função",
+        "   Params para nome: current_name* (nome atual), new_name* (novo nome)",
+        "   Params para cargo: current_name ou target_self=true, new_job_title*",
+        "   Triggers: 'muda o nome do Leo para Leonardo', 'renomeia colaborador Ana para Ana Paula', 'corrige o colaborador Leo para Leonardo'",
+        "   Triggers de cargo: 'alterar cargo do Leo para Desenvolvedor', 'corrigir função da Ana para Gestora Comercial', 'alterar meu cargo para CEO'",
         "",
-        "10. cannot_do_task — Usuário informa que não conseguirá realizar uma tarefa",
+        "10. edit_client — Renomear/corrigir cliente da empresa em todas as tarefas",
+        "   Params: current_name* (nome atual), new_name* (novo nome)",
+        "   Triggers: 'renomear cliente Derry para Dairy', 'corrigir cliente Derry para Dairy', 'cliente Derry agora é Dairy'",
+        "",
+        "11. cannot_do_task — Usuário informa que não conseguirá realizar uma tarefa",
         "   Params: task_reference (fragmento do título, opcional)",
         "   Triggers: 'não vou conseguir', 'não vai dar', 'impossível', 'não tenho como', 'não é comigo', 'não consigo fazer'",
         "",
-        "11. needs_help_task — Usuário pede ajuda ou está travado em uma tarefa",
+        "12. needs_help_task — Usuário pede ajuda ou está travado em uma tarefa",
         "   Params: task_reference (opcional)",
         "   Triggers: 'preciso de ajuda', 'travei', 'não sei como fazer', 'me ajuda com isso', 'tenho dificuldade'",
         "",
-        "12. reassign_task — Usuário pede para repassar/transferir uma tarefa para outra pessoa",
+        "13. reassign_task — Usuário pede para repassar/transferir uma tarefa para outra pessoa",
         "   Params: task_reference (opcional)",
         "   Triggers: 'passa para outra pessoa', 'repassa isso', 'transfere para o time', 'melhor outra pessoa', 'não é comigo isso'",
         "",
@@ -286,8 +292,8 @@ def _build_system_prompt(
         "- Confidence: 95=explícito e inequívoco, 85=implícito mas claro, 70=provável, 50=ambíguo",
         "",
         "FILLERS CONVERSACIONAIS EM ÁUDIOS — IGNORE COMPLETAMENTE:",
-        "- Frases de confirmação no FINAL de mensagens de voz NÃO são a tarefa: 'tá bom?', 'ta bom?', 'ok?', 'certo?', 'né?', 'né não?', 'pode ser?', 'beleza?', 'pode?', 'tudo bem?', 'combinado?', 'tá?', 'sim?', 'correto?'",
-        "- Frases introdutórias NÃO são a tarefa: 'lembra de', 'lembrar de', 'não esquece de', 'não esquece que', 'pode fazer', 'preciso que você', 'quero que você'",
+        "- Frases de confirmação no FINAL de mensagens de voz NÃO são a tarefa: 'por favor', 'tá bom?', 'ta bom?', 'ok?', 'certo?', 'né?', 'né não?', 'pode ser?', 'beleza?', 'pode?', 'tudo bem?', 'combinado?', 'tá?', 'sim?', 'correto?'",
+        "- Frases introdutórias NÃO são a tarefa: 'lembra de', 'lembrar de', 'não esquece de', 'não esquece que', 'pode fazer', 'pode checar', 'preciso que você', 'quero que você'",
         "- O título deve ser APENAS a ação concreta: verbo + objeto + contexto relevante",
         "- NUNCA use o filler de confirmação como título, mesmo que seja a última coisa dita na mensagem",
         "",
@@ -307,11 +313,12 @@ def _build_system_prompt(
         '- "Matheus, quero que você dê uma olhadinha nas tasks da Derry para entender o que está pendente" = create_task; client_name="Derry"; due_date=null',
         '- "Leo, lembra de amanhã dar uma olhada no código da SpaceX para ver ali os bugs que eles sinalizaram, tá bom?" = create_task; title="Dar uma olhada no código da SpaceX"; assignee_name="Leo"; client_name="SpaceX"; IGNORAR "tá bom?" — é filler conversacional de confirmação, NÃO é o título',
         '- "João, pode conferir o contrato da Nanocare até sexta, certo?" = create_task; title="Conferir o contrato da Nanocare"; assignee_name="João"; client_name="Nanocare"; IGNORAR "certo?" — é filler',
+        '- "Leo, na segunda, pode fazer o deploy da Nova Tech, por favor" = create_task; title="Fazer o deploy"; assignee_name="Leo"; client_name="Nova Tech"; due_date=segunda; IGNORAR "por favor"',
         '- "quero convidar um colaborador" = action=null se faltam nome/telefone; explique depois no fallback',
         '- "compartilhei um contato" em texto comum = action=null; contato compartilhado real vem pelo evento contactMessage',
         "",
         "FORMATO DE RESPOSTA — retorne APENAS este JSON (sem texto antes ou depois):",
-        '{"intent": "task|query|command|other", "action": "create_task|list_my_tasks|complete_task|start_task|reschedule_task|edit_task|cancel_task|task_status|team_summary|invite_user|edit_member|cannot_do_task|needs_help_task|reassign_task|null", "params": {}, "confidence": 0}',
+        '{"intent": "task|query|command|other", "action": "create_task|list_my_tasks|complete_task|start_task|reschedule_task|edit_task|cancel_task|task_status|team_summary|invite_user|edit_member|edit_client|cannot_do_task|needs_help_task|reassign_task|null", "params": {}, "confidence": 0}',
         "",
         "Exemplos de params por ação:",
         'create_task: {"title": "Revisar proposta", "due_date": "2026-05-01T10:00:00", "assignee_name": "João", "client_name": "Alpha", "priority": "high"}',
@@ -330,6 +337,10 @@ def _build_system_prompt(
         'task_status: {"task_reference": "deploy", "member_name": "Leo", "client_name": "Nanocare", "status_filter": "open"}',
         'team_summary: {"period": "today", "view": "summary"}',
         'invite_user: {"name": "João Silva", "phone": "11999990001", "job_title": "Vendedor", "role": "member"}',
+        'edit_client: {"current_name": "Derry", "new_name": "Dairy"}',
+        'edit_member: {"current_name": "Leo", "new_name": "Leonardo"}',
+        'edit_member: {"current_name": "Leo", "new_job_title": "Desenvolvedor"}',
+        'edit_member: {"target_self": true, "new_job_title": "CEO"}',
     ]
 
     return "\n".join(lines)
@@ -393,7 +404,8 @@ def _parse_with_llm_safely(
         return None
     try:
         result = _sanitize_llm_parsed(
-            _parse_with_llm(message, context=context, history=history, team_members=team_members)
+            _parse_with_llm(message, context=context, history=history, team_members=team_members),
+            original_message=message,
         )
         result = _fill_addressed_assignee_from_team(message, result, team_members)
         result = _fill_task_status_member_from_team(message, result, team_members)
@@ -429,7 +441,7 @@ def _apply_confidence_floor(result: ParsedCommand) -> ParsedCommand:
 
 
 
-def _sanitize_llm_parsed(parsed: ParsedCommand) -> ParsedCommand:
+def _sanitize_llm_parsed(parsed: ParsedCommand, original_message: str | None = None) -> ParsedCommand:
     if parsed.action is None:
         return ParsedCommand(intent=Intent.other, action=None, params={}, confidence=parsed.confidence)
 
@@ -445,7 +457,8 @@ def _sanitize_llm_parsed(parsed: ParsedCommand) -> ParsedCommand:
         Action.task_status: {"task_reference", "member_name", "client_name", "status_filter"},
         Action.team_summary: {"period", "view", "member_name"},
         Action.invite_user: {"name", "phone", "job_title", "role"},
-        Action.edit_member: {"current_name", "new_name"},
+        Action.edit_member: {"current_name", "new_name", "new_job_title", "target_self"},
+        Action.edit_client: {"current_name", "new_name"},
         Action.cannot_do_task: {"task_reference"},
         Action.needs_help_task: {"task_reference"},
         Action.reassign_task: {"task_reference"},
@@ -454,7 +467,17 @@ def _sanitize_llm_parsed(parsed: ParsedCommand) -> ParsedCommand:
     params = {key: _clean_llm_value(value) for key, value in params.items() if key in allowed[parsed.action]}
 
     if parsed.action == Action.create_task:
-        params["title"] = _normalize_task_title(str(params.get("title") or "").strip())
+        normalized_original = _normalize_audio_artifacts(_normalize_text(original_message or ""))
+        if not params.get("client_name") and normalized_original:
+            params["client_name"] = _guess_client_name(normalized_original)
+        title = _normalize_task_title(_strip_trailing_filler(str(params.get("title") or "").strip()))
+        if params.get("client_name"):
+            title = _normalize_task_title(_remove_client_reference(title, str(params["client_name"])).strip())
+        if _is_bad_task_title(title) and normalized_original:
+            repaired_title = _clean_task_title(normalized_original, client_name=params.get("client_name"))
+            if not _is_bad_task_title(repaired_title):
+                title = repaired_title
+        params["title"] = title
         if not params["title"]:
             return ParsedCommand(intent=Intent.other, action=None, params={}, confidence=20)
         if params.get("due_date"):
@@ -469,6 +492,10 @@ def _sanitize_llm_parsed(parsed: ParsedCommand) -> ParsedCommand:
         if task_filter not in {"today", "overdue", "all", "pending", "date", "done"}:
             task_filter = "pending"
         params["filter"] = task_filter
+        view = str(params.get("view") or "my").lower()
+        if view not in {"my", "delegated", "all"}:
+            view = "my"
+        params["view"] = view
 
     if parsed.action == Action.team_summary:
         view = str(params.get("view") or "summary").lower()
@@ -756,6 +783,42 @@ def _parse_locally(message: str) -> ParsedCommand:
             confidence=80,
         )
 
+    edit_task_params = _detect_edit_task_params(text)
+    if edit_task_params is not None:
+        return ParsedCommand(
+            intent=Intent.command,
+            action=Action.edit_task,
+            params=edit_task_params,
+            confidence=82,
+        )
+
+    edit_client_params = _detect_edit_client_params(text)
+    if edit_client_params is not None:
+        return ParsedCommand(
+            intent=Intent.command,
+            action=Action.edit_client,
+            params=edit_client_params,
+            confidence=85,
+        )
+
+    edit_member_job_title_params = _detect_edit_member_job_title_params(text)
+    if edit_member_job_title_params is not None:
+        return ParsedCommand(
+            intent=Intent.command,
+            action=Action.edit_member,
+            params=edit_member_job_title_params,
+            confidence=85,
+        )
+
+    edit_member_params = _detect_edit_member_params(text)
+    if edit_member_params is not None:
+        return ParsedCommand(
+            intent=Intent.command,
+            action=Action.edit_member,
+            params=edit_member_params,
+            confidence=85,
+        )
+
     if _looks_like_task(text):
         client_name = _guess_client_name(text)
         return ParsedCommand(
@@ -812,24 +875,6 @@ def _parse_locally(message: str) -> ParsedCommand:
             action=Action.reschedule_task,
             params={**clear_due_date_params, "clear_due_date": True},
             confidence=85,
-        )
-
-    edit_member_params = _detect_edit_member_params(text)
-    if edit_member_params is not None:
-        return ParsedCommand(
-            intent=Intent.command,
-            action=Action.edit_member,
-            params=edit_member_params,
-            confidence=85,
-        )
-
-    edit_task_params = _detect_edit_task_params(text)
-    if edit_task_params is not None:
-        return ParsedCommand(
-            intent=Intent.command,
-            action=Action.edit_task,
-            params=edit_task_params,
-            confidence=82,
         )
 
     due_update_params = _detect_due_update_params(text)
@@ -904,12 +949,14 @@ def _has_natural_task_request(text: str) -> bool:
 
 
 def _detect_task_query_params(text: str) -> dict | None:
+    view = _detect_task_query_view(text)
     specific_date = _guess_specific_date(text)
-    if specific_date is not None and _looks_like_task_query(text):
-        return {"filter": "date", "date": specific_date.strftime("%Y-%m-%d")}
+    params: dict | None = None
+    if specific_date is not None and (_looks_like_task_query(text) or view is not None):
+        params = {"filter": "date", "date": specific_date.strftime("%Y-%m-%d")}
 
-    if _contains_any(text, ["atrasada", "atrasadas", "atrasado", "atrasados", "em atraso"]):
-        return {"filter": "overdue"}
+    if params is None and _contains_any(text, ["atrasada", "atrasadas", "atrasado", "atrasados", "em atraso"]):
+        params = {"filter": "overdue"}
 
     today_terms = [
         "tarefas de hoje",
@@ -921,8 +968,8 @@ def _detect_task_query_params(text: str) -> dict | None:
         "hoje pra fazer",
         "hoje para fazer",
     ]
-    if _contains_any(text, today_terms):
-        return {"filter": "today"}
+    if params is None and (_contains_any(text, today_terms) or (view is not None and re.search(r"\bhoje\b", text))):
+        params = {"filter": "today"}
 
     all_terms = [
         "todas minhas tarefas",
@@ -931,8 +978,8 @@ def _detect_task_query_params(text: str) -> dict | None:
         "todas as tarefas",
         "minhas tarefas todas",
     ]
-    if _contains_any(text, all_terms):
-        return {"filter": "all"}
+    if params is None and _contains_any(text, all_terms):
+        params = {"filter": "all"}
 
     done_terms = [
         "minhas tarefas concluidas",
@@ -960,55 +1007,22 @@ def _detect_task_query_params(text: str) -> dict | None:
         "o que ja terminei",
         "tarefas feitas",
         "minhas tarefas feitas",
+        "delegadas concluidas",
+        "delegadas finalizadas",
+        "tarefas delegadas concluidas",
+        "tarefas delegadas finalizadas",
+        "tarefas que deleguei concluidas",
+        "tarefas que deleguei finalizadas",
         "ja conclui",
         "ja finalizei",
         "ja terminei",
     ]
-    if _contains_any(text, done_terms):
-        return {"filter": "done"}
-
-    # Combined view: user explicitly wants both their own tasks AND delegated ones
-    combined_terms = [
-        "minhas tarefas e as que deleguei",
-        "minhas tarefas e delegadas",
-        "tarefas minhas e delegadas",
-        "minhas e as delegadas",
-        "tanto as minhas quanto",
-        "tanto minhas quanto",
-        "me mostra tudo",
-        "mostra tudo",
-        "tudo que tenho",
-        "resumo geral das minhas",
-        "minha visao geral",
-        "minha visão geral",
-        "visao geral das minhas tarefas",
-        "visão geral das minhas tarefas",
-    ]
-    if _contains_any(text, combined_terms):
-        return {"filter": "pending", "view": "all"}
-
-    # Also detect combined intent when both "minha"/"minhas" and "deleguei"/"delegadas" appear together
-    if re.search(r"\b(minhas?|minha)\b", text) and re.search(r"\b(delegue[io]|delegadas?|passei\s+para\s+o\s+time)\b", text):
-        return {"filter": "pending", "view": "all"}
-
-    delegated_terms = [
-        "tarefas que eu deleguei",
-        "tarefas que deleguei",
-        "o que eu deleguei",
-        "o que deleguei",
-        "delegadas por mim",
-        "tarefas delegadas",
-        "que eu criei para",
-        "que criei para",
-        "tarefas criadas por mim",
-        "tarefas que eu criei",
-    ]
-    if _contains_any(text, delegated_terms):
-        return {"filter": "pending", "view": "delegated"}
+    if params is None and _contains_any(text, done_terms):
+        params = {"filter": "done"}
 
     client_filter = _detect_list_client_filter(text)
-    if client_filter is not None:
-        return {"filter": "pending", "client_name": client_filter}
+    if params is None and client_filter is not None:
+        params = {"filter": "pending", "client_name": client_filter}
 
     pending_terms = [
         "minhas tarefas",
@@ -1034,23 +1048,70 @@ def _detect_task_query_params(text: str) -> dict | None:
         "tenho algo pra fazer",
         "tenho algo para fazer",
     ]
-    if _contains_any(text, pending_terms):
-        return {"filter": "pending"}
+    if params is None and _contains_any(text, pending_terms):
+        params = {"filter": "pending"}
 
-    if _looks_like_task_query(text):
-        return {"filter": "pending"}
+    if params is None and (_looks_like_task_query(text) or view is not None):
+        params = {"filter": "pending"}
 
+    if params is None:
+        return None
+    if view is not None:
+        params["view"] = view
+    return params
+
+
+def _detect_task_query_view(text: str) -> str | None:
+    # Combined view: user explicitly wants both their own tasks AND delegated ones.
+    combined_terms = [
+        "minhas tarefas e as que deleguei",
+        "minhas tarefas e delegadas",
+        "tarefas minhas e delegadas",
+        "minhas e as delegadas",
+        "tanto as minhas quanto",
+        "tanto minhas quanto",
+        "me mostra tudo",
+        "mostra tudo",
+        "tudo que tenho",
+        "resumo geral das minhas",
+        "minha visao geral",
+        "minha visão geral",
+        "visao geral das minhas tarefas",
+        "visão geral das minhas tarefas",
+    ]
+    if _contains_any(text, combined_terms):
+        return "all"
+
+    # Also detect combined intent when both "minha"/"minhas" and delegated terms appear together.
+    if re.search(r"\b(minhas?|minha)\b", text) and re.search(r"\b(delegue[io]|delegadas?|passei\s+para\s+o\s+time)\b", text):
+        return "all"
+
+    delegated_terms = [
+        "tarefas que eu deleguei",
+        "tarefas que deleguei",
+        "o que eu deleguei",
+        "o que deleguei",
+        "delegadas por mim",
+        "tarefas delegadas",
+        "que eu criei para",
+        "que criei para",
+        "tarefas criadas por mim",
+        "tarefas que eu criei",
+    ]
+    if _contains_any(text, delegated_terms):
+        return "delegated"
     return None
 
 
 def _detect_list_client_filter(text: str) -> str | None:
     match = re.search(
-        r"\b(?:minhas\s+)?(?:tarefas|pendencias|pendentes)\s+(?:do|da|de|para)\s+(?:cliente\s+)?([a-z][a-z0-9 -]{1,40})$",
+        r"\b(?:minhas\s+)?(?:tarefas|pendencias|pendentes)\s+(?:do|da|de|para)\s+(?:cliente\s+)?([a-z][a-z0-9 -]{1,40})$"
+        r"|\btarefas\s+(?:que\s+(?:eu\s+)?deleguei|delegadas?)\s+(?:do|da|de|para)\s+(?:cliente\s+)?([a-z][a-z0-9 -]{1,40})$",
         text,
     )
     if not match:
         return None
-    candidate = match.group(1).strip()
+    candidate = next(group for group in match.groups() if group).strip()
     if candidate in {"time", "equipe", "hoje", "amanha", "semana", "todos", "todas"}:
         return None
     return _title_ascii_name(candidate)
@@ -1168,13 +1229,86 @@ def _detect_clear_due_date_params(text: str) -> dict | None:
 
 def _detect_edit_member_params(text: str) -> dict | None:
     patterns = [
-        r"\b(?:muda|mudar|altera|alterar|atualiza|atualizar|renomeia|renomear|troca|trocar)\s+o\s+nome\s+d[oa]\s+([a-z][a-z0-9 ]{1,30})\s+(?:para|pra|pro)\s+([a-z][a-z0-9 ]{1,40})",
+        r"\b(?:muda|mudar|altera|alterar|atualiza|atualizar|renomeia|renomear|troca|trocar|corrige|corrigir)\s+o\s+nome\s+d[oa]\s+([a-z][a-z0-9 ]{1,30})\s+(?:para|pra|pro)\s+([a-z][a-z0-9 ]{1,40})",
         r"\b(?:muda|mudar|altera|alterar)\s+nome\s+d[oa]\s+([a-z][a-z0-9 ]{1,30})\s+(?:para|pra|pro)\s+([a-z][a-z0-9 ]{1,40})",
+        r"\b(?:renomeia|renomear|corrige|corrigir|muda|mudar|altera|alterar)\s+(?:o\s+)?(?:colaborador|membro|responsavel|responsável)\s+([a-z][a-z0-9 ]{1,30})\s+(?:para|pra|pro)\s+([a-z][a-z0-9 ]{1,40})",
+        r"\b([a-z][a-z0-9 ]{1,30})\s+(?:na\s+verdade\s+se\s+chama|agora\s+se\s+chama|agora\s+e|agora\s+é)\s+([a-z][a-z0-9 ]{1,40})",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             current_name = _title_ascii_name(match.group(1).strip())
+            new_name = _title_ascii_name(match.group(2).strip())
+            if current_name and new_name and current_name != new_name:
+                return {"current_name": current_name, "new_name": new_name}
+    return None
+
+
+def _detect_edit_member_job_title_params(text: str) -> dict | None:
+    self_patterns = [
+        r"\b(?:muda|mudar|altera|alterar|atualiza|atualizar|corrige|corrigir|troca|trocar)\s+(?:o\s+)?(?:meu|minha)\s+(?:cargo|funcao|função|perfil)\s+(?:para|pra|pro)\s+(.+)$",
+        r"\b(?:meu|minha)\s+(?:cargo|funcao|função|perfil)\s+(?:agora\s+e|agora\s+é|na\s+verdade\s+e|na\s+verdade\s+é|e|é)\s+(.+)$",
+    ]
+    for pattern in self_patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        new_job_title = _clean_job_title_update_value(match.group(1))
+        if new_job_title:
+            return {"target_self": True, "new_job_title": new_job_title}
+
+    member_patterns = [
+        r"\b(?:muda|mudar|altera|alterar|atualiza|atualizar|corrige|corrigir|troca|trocar)\s+(?:o\s+)?(?:nome\s+d[oa]\s+)?(?:cargo|funcao|função|perfil)\s+d[oa]\s+([a-z][a-z0-9 ]{1,30})\s+(?:para|pra|pro)\s+(.+)$",
+        r"\b(?:cargo|funcao|função|perfil)\s+d[oa]\s+([a-z][a-z0-9 ]{1,30})\s+(?:agora\s+e|agora\s+é|na\s+verdade\s+e|na\s+verdade\s+é|e|é)\s+(.+)$",
+    ]
+    for pattern in member_patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        current_name = _title_ascii_name(match.group(1).strip())
+        new_job_title = _clean_job_title_update_value(match.group(2))
+        if current_name and new_job_title:
+            return {"current_name": current_name, "new_job_title": new_job_title}
+    return None
+
+
+def _clean_job_title_update_value(value: str) -> str | None:
+    cleaned = value.strip(" .,:;!?")
+    cleaned = re.sub(r"\b(?:ok|certo|por favor|pfv|beleza|ta bom|tá bom)\b.*$", "", cleaned).strip(" .,:;!?")
+    if len(cleaned) < 2 or len(cleaned) > 60:
+        return None
+    if _normalize_text(cleaned) in {"cargo", "funcao", "função", "perfil", "ok", "sim"}:
+        return None
+    return _title_job_title(cleaned)
+
+
+def _title_job_title(value: str) -> str:
+    acronyms = {"ceo", "cto", "cfo", "coo", "ia", "ai", "rh", "ti", "ux", "ui"}
+    lowercase_words = {"de", "da", "do", "das", "dos", "e"}
+    words = []
+    for index, part in enumerate(value.split()):
+        normalized = _normalize_text(part)
+        if normalized in acronyms:
+            words.append(part.upper())
+        elif index > 0 and normalized in lowercase_words:
+            words.append(normalized)
+        else:
+            words.append(part[:1].upper() + part[1:])
+    return " ".join(words)
+
+
+def _detect_edit_client_params(text: str) -> dict | None:
+    patterns = [
+        r"\b(?:renomeia|renomear|corrige|corrigir|muda|mudar|altera|alterar|troca|trocar)\s+(?:o\s+)?(?:nome\s+d[oa]\s+)?cliente\s+([a-z][a-z0-9 ]{1,40})\s+(?:para|pra|pro)\s+([a-z][a-z0-9 ]{1,40})",
+        r"\bcliente\s+([a-z][a-z0-9 ]{1,40})\s+(?:agora\s+e|agora\s+é|na\s+verdade\s+e|na\s+verdade\s+é|se\s+chama)\s+([a-z][a-z0-9 ]{1,40})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            raw_current_name = match.group(1).strip()
+            if re.search(r"\btarefa\b", raw_current_name):
+                continue
+            current_name = _title_ascii_name(raw_current_name)
             new_name = _title_ascii_name(match.group(2).strip())
             if current_name and new_name and current_name != new_name:
                 return {"current_name": current_name, "new_name": new_name}
@@ -1204,6 +1338,16 @@ def _detect_edit_task_params(text: str) -> dict | None:
         return {
             "task_reference": _normalize_task_title(reference) if len(reference) >= 3 else None,
             "new_client_name": new_client,
+        }
+
+    client_for_task_match = re.search(
+        r"\b(?:muda|mudar|troca|trocar|altera|alterar)\s+o\s+cliente\s+d[aeo]?\s+tarefa\s+(.+?)\s+(?:para|pra|pro)\s+([a-z][a-z0-9 ]{1,40})(?:\s|$)",
+        text,
+    )
+    if client_for_task_match:
+        return {
+            "task_reference": _normalize_task_title(client_for_task_match.group(1).strip()),
+            "new_client_name": _title_ascii_name(client_for_task_match.group(2).strip()),
         }
 
     title_match = re.search(
@@ -1430,20 +1574,26 @@ def _contains_command_word(text: str, terms: list[str]) -> bool:
 
 
 def _clean_task_title(text: str, client_name: str | None = None) -> str:
-    title = _after_any(text, ["criar tarefa", "nova tarefa", "delegar", "preciso que", *PERSONAL_TASK_MARKERS])
+    title = text
     if "," in title:
         title = title.split(",", 1)[1]
     else:
         leading_assignee = _leading_assignee_candidate(title)
         if leading_assignee:
             title = title[len(leading_assignee) :].strip()
+    title = _strip_leading_schedule_clause(title)
+    title = _strip_leading_request_prefix(title)
     title = _after_any(
         title,
         [
+            "criar tarefa",
+            "nova tarefa",
+            "delegar",
             "quero que voce",
             "queria que voce",
             "gostaria que voce",
             "preciso que voce",
+            *PERSONAL_TASK_MARKERS,
         ],
     )
     if client_name:
@@ -1484,10 +1634,13 @@ def _clean_task_title(text: str, client_name: str | None = None) -> str:
 
 def _guess_client_name(text: str) -> str | None:
     body = text.split(",", 1)[1] if "," in text else text
+    body = _strip_leading_schedule_clause(body)
+    body = _strip_leading_request_prefix(body)
+    body = _strip_trailing_filler(body)
     body = _strip_due_and_priority(body)
 
     patterns = [
-        r"\b(?:site|app|sistema|contrato|proposta|fluxos|prazos|tarefas)\s+(?:da|do|de|no|na)\s+([a-z0-9][a-z0-9 -]{1,40})$",
+        r"\b(?:site|app|sistema|contrato|proposta|fluxos|prazos|tarefas|deploy)\s+(?:da|do|de|no|na)\s+([a-z0-9][a-z0-9 -]{1,40})$",
         r"\b(?:tasks|task)\s+(?:da|do|de|no|na)\s+([a-z0-9][a-z0-9-]{1,40})(?:\s+para\b.*)?$",
         r"\b(?:cliente|client)\s+([a-z0-9][a-z0-9 -]{1,40})$",
         r"\b(?:da|do|de|no|na)\s+([a-z0-9][a-z0-9-]{1,40})(?:\s+no\s+n8n)?$",
@@ -1538,6 +1691,30 @@ def _split_before_first_marker(value: str, markers: list[str]) -> str:
     if not positions:
         return value
     return value[: min(positions)]
+
+
+def _strip_leading_schedule_clause(value: str) -> str:
+    weekdays = "segunda(?:-feira)?|terca(?:-feira)?|quarta(?:-feira)?|quinta(?:-feira)?|sexta(?:-feira)?|sabado|domingo"
+    patterns = [
+        rf"^\s*(?:na|no|nesta|nesse|em)?\s*(?:{weekdays})(?:\s+(?:de\s+manha|pela\s+manha|de\s+tarde|a\s+tarde|de\s+noite|as\s+\d{{1,2}}(?::\d{{2}})?))?\s*,?\s*",
+        r"^\s*(?:amanha|hoje)(?:\s+(?:de\s+manha|pela\s+manha|de\s+tarde|a\s+tarde|de\s+noite|as\s+\d{1,2}(?::\d{2})?))?\s*,?\s*",
+    ]
+    cleaned = value
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE).strip(" ,.")
+    return cleaned
+
+
+def _strip_leading_request_prefix(value: str) -> str:
+    patterns = [
+        r"^\s*por\s+favor\s*,?\s*",
+        r"^\s*favor\s*,?\s*",
+        r"^\s*(?:pode|consegue|conseguiria|poderia)\s+",
+    ]
+    cleaned = value
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE).strip(" ,.")
+    return cleaned
 
 
 def _clean_client_candidate(value: str) -> str:
@@ -1880,6 +2057,9 @@ def _strip_demonstrative_ref(value: str | None) -> str | None:
 def _strip_trailing_filler(value: str) -> str:
     """Remove conversational confirmation fillers from the end of a task title."""
     fillers = [
+        r",?\s*por\s+favor\.?$",
+        r",?\s*favor\.?$",
+        r",?\s*por\s+gentileza\.?$",
         r",?\s*ta\s+bom\??$",
         r",?\s*tudo\s+bem\??$",
         r",?\s*tudo\s+certo\??$",
@@ -1899,6 +2079,28 @@ def _strip_trailing_filler(value: str) -> str:
     for pattern in fillers:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip(" ,.")
     return cleaned
+
+
+def _is_bad_task_title(value: str | None) -> bool:
+    if not value:
+        return True
+    normalized = _normalize_text(value).strip(" .,;:!?")
+    filler_titles = {
+        "por favor",
+        "favor",
+        "por gentileza",
+        "ok",
+        "certo",
+        "beleza",
+        "combinado",
+        "ta bom",
+        "tudo bem",
+        "pode ser",
+        "pode",
+        "sim",
+        "correto",
+    }
+    return normalized in filler_titles
 
 
 def _title_ascii_name(value: str) -> str:

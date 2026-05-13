@@ -2,6 +2,7 @@
 
 from whatsapp_task_agent.api import app
 from whatsapp_task_agent.evolution import normalize_evolution_payload
+from whatsapp_task_agent.settings import settings
 from whatsapp_task_agent.transcription import AudioTranscriptionError
 
 
@@ -56,6 +57,7 @@ def test_evolution_audio_payload_without_media_returns_safe_failure() -> None:
 
 def test_evolution_audio_payload_transcribes_and_sends_reply(monkeypatch) -> None:
     sent = []
+    monkeypatch.setattr(settings, "evolution_send_enabled", True)
 
     class FakeClient:
         def send_text(self, number, text):
@@ -98,6 +100,7 @@ def test_evolution_audio_payload_transcribes_and_sends_reply(monkeypatch) -> Non
 
 def test_evolution_audio_transcription_error_sends_safe_reply(monkeypatch) -> None:
     sent = {}
+    monkeypatch.setattr(settings, "evolution_send_enabled", True)
 
     class FakeClient:
         def send_text(self, number, text):
@@ -190,6 +193,7 @@ def test_evolution_from_me_payload_is_ignored_without_reply() -> None:
 
 def test_evolution_processed_message_sends_reply(monkeypatch) -> None:
     sent = {}
+    monkeypatch.setattr(settings, "evolution_send_enabled", True)
 
     class FakeClient:
         def send_text(self, number, text):

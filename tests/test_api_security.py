@@ -5,6 +5,7 @@ from whatsapp_task_agent.api import (
     _format_invite_notification,
     _format_task_update_notification,
     _send_delegation_notification,
+    _send_evolution_reply,
     _send_task_update_notification,
     app,
 )
@@ -29,6 +30,53 @@ def test_notification_retry_job_requires_secret_when_configured(monkeypatch) -> 
 
     assert response.status_code == 401
     assert response.json()["detail"] == "invalid_job_secret"
+
+
+def test_jobs_require_secret_configuration_in_production(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "reminder_job_secret", None)
+    client = TestClient(app)
+
+    response = client.post("/jobs/reminders", json={})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "reminder_job_secret_not_configured"
+
+
+def test_evolution_webhook_requires_secret_configuration_in_production(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "evolution_webhook_secret", None)
+    client = TestClient(app)
+
+    response = client.post("/webhooks/evolution", json={})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "evolution_webhook_secret_not_configured"
+
+
+def test_manual_whatsapp_webhook_requires_observe_key(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "observe_api_key", None)
+    client = TestClient(app)
+
+    response = client.post(
+        "/webhooks/whatsapp",
+        json={"from_phone": "+5511999999999", "message": "minhas tarefas"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "observe_disabled"
+
+
+def test_send_evolution_reply_dry_run_when_send_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "evolution_send_enabled", False)
+    monkeypatch.setattr(
+        "whatsapp_task_agent.api.build_evolution_client",
+        lambda: (_ for _ in ()).throw(AssertionError("client should not be built")),
+    )
+
+    result = _send_evolution_reply("+5511999999999", "teste")
+
+    assert result == {"status": "dry_run"}
 
 
 def test_delegation_notification_is_skipped_for_self_assigned_task() -> None:

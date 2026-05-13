@@ -1,8 +1,10 @@
-﻿from datetime import datetime
+﻿from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
-from whatsapp_task_agent.graph import app_graph
+from whatsapp_task_agent import tools
+from whatsapp_task_agent.graph import _task_matches, app_graph
 from whatsapp_task_agent.parser import parse_message, _fill_addressed_assignee_from_team, _sanitize_llm_parsed
-from whatsapp_task_agent.schemas import Action, Intent, ParsedCommand
+from whatsapp_task_agent.schemas import Action, Intent, ParsedCommand, Task
 from whatsapp_task_agent.store import InMemoryTaskStore
 
 
@@ -26,6 +28,62 @@ def test_create_and_list_task() -> None:
     )
 
     assert "Enviar proposta" in listed["reply"]
+
+
+def test_list_tasks_and_delegated_tasks_uses_separate_sections() -> None:
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "criar tarefa revisar contrato da listagem amanha as 18",
+            "provider_message_id": "test-list-sections-1",
+        }
+    )
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Joao, enviar proposta da listagem amanha as 10",
+            "provider_message_id": "test-list-sections-2",
+        }
+    )
+
+    listed = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "minhas tarefas e as que deleguei",
+            "provider_message_id": "test-list-sections-3",
+        }
+    )
+
+    assert "📋 Suas tarefas abertas" in listed["reply"]
+    assert "📤 Tarefas que você delegou" in listed["reply"]
+    assert "Revisar contrato" in listed["reply"]
+    assert "Enviar proposta" in listed["reply"]
+    assert "Cliente: Listagem" in listed["reply"]
+    assert "Responsável: Joao" in listed["reply"]
+    assert "Prazo:" in listed["reply"]
+    assert "Status: pendente" in listed["reply"]
+
+
+def test_list_delegated_tasks_uses_delegated_section_only() -> None:
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Joao, validar relatorio delegado unico amanha as 11",
+            "provider_message_id": "test-list-delegated-only-setup",
+        }
+    )
+
+    listed = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "tarefas que eu deleguei",
+            "provider_message_id": "test-list-delegated-only-1",
+        }
+    )
+
+    assert "📤 Tarefas que você delegou" in listed["reply"]
+    assert "Validar relatorio delegado unico" in listed["reply"]
+    assert "Responsável: Joao" in listed["reply"]
 
 
 def test_create_reply_includes_operational_details() -> None:
@@ -146,6 +204,36 @@ def test_pending_task_can_be_created_without_due_date() -> None:
     assert "Revisar contrato" in updated["reply"]
 
 
+def test_task_matches_sorts_mixed_timezone_due_dates() -> None:
+    company_id = uuid4()
+    user_id = uuid4()
+    tasks = [
+        Task(
+            id=uuid4(),
+            company_id=company_id,
+            title="Tarefa com timezone",
+            assigned_to=user_id,
+            created_by=user_id,
+            due_at=datetime(2026, 5, 8, 15, 0, tzinfo=timezone.utc),
+        ),
+        Task(
+            id=uuid4(),
+            company_id=company_id,
+            title="Tarefa sem timezone",
+            assigned_to=user_id,
+            created_by=user_id,
+            due_at=datetime(2026, 5, 8, 13, 0),
+        ),
+    ]
+
+    matches = _task_matches(tasks)
+
+    assert [match["title"] for match in matches] == [
+        "Tarefa com timezone",
+        "Tarefa sem timezone",
+    ]
+
+
 def test_pending_task_accepts_audio_transcription_without_due_date_punctuation() -> None:
     created = app_graph.invoke(
         {
@@ -188,6 +276,37 @@ def test_parser_understands_test_task_with_polite_suffix() -> None:
     assert parsed.params["assignee_name"] == "Leozin"
     assert parsed.params["client_name"] == "Derry"
     assert "T18:00:00" in parsed.params["due_date"]
+
+
+def test_parser_handles_leading_weekday_and_polite_suffix() -> None:
+    parsed = parse_message("Leo, na segunda, pode fazer o deploy da nova tech, por favor.")
+
+    assert parsed.action == "create_task"
+    assert parsed.params["title"] == "Fazer o deploy"
+    assert parsed.params["assignee_name"] == "Leo"
+    assert parsed.params["client_name"] == "Nova Tech"
+    assert parsed.params["due_date"] is not None
+
+
+def test_llm_sanitizer_repairs_filler_only_task_title() -> None:
+    parsed = _sanitize_llm_parsed(
+        ParsedCommand(
+            intent=Intent.task,
+            action=Action.create_task,
+            params={
+                "title": "Por favor",
+                "assignee_name": "Leo",
+                "due_date": "2026-05-11T18:00:00",
+            },
+            confidence=95,
+        ),
+        original_message="Leo, na segunda, pode fazer o deploy da nova tech, por favor.",
+    )
+
+    assert parsed.action == Action.create_task
+    assert parsed.params["title"] == "Fazer o deploy"
+    assert parsed.params["client_name"] == "Nova Tech"
+    assert parsed.params["due_date"] == "2026-05-11T18:00:00-03:00"
 
 
 def test_parser_handles_audio_without_comma_and_transcription_artifact() -> None:
@@ -508,6 +627,27 @@ def test_parser_understands_natural_pending_task_queries() -> None:
         assert parsed.params["filter"] == "pending"
 
 
+def test_parser_understands_personal_and_delegated_task_views() -> None:
+    delegated = parse_message("tarefas que eu deleguei")
+    combined = parse_message("minhas tarefas e as que deleguei")
+    delegated_today = parse_message("tarefas que deleguei hoje")
+    delegated_client = parse_message("tarefas que eu deleguei da Nanocare")
+
+    assert delegated.action == "list_my_tasks"
+    assert delegated.params["filter"] == "pending"
+    assert delegated.params["view"] == "delegated"
+    assert combined.action == "list_my_tasks"
+    assert combined.params["filter"] == "pending"
+    assert combined.params["view"] == "all"
+    assert delegated_today.action == "list_my_tasks"
+    assert delegated_today.params["filter"] == "today"
+    assert delegated_today.params["view"] == "delegated"
+    assert delegated_client.action == "list_my_tasks"
+    assert delegated_client.params["filter"] == "pending"
+    assert delegated_client.params["view"] == "delegated"
+    assert delegated_client.params["client_name"] == "Nanocare"
+
+
 def test_contextual_fallback_asks_for_missing_delegation_details() -> None:
     result = app_graph.invoke(
         {
@@ -595,6 +735,83 @@ def test_specific_date_query_filters_tasks() -> None:
     assert [task.title for task in tasks] == ["Tarefa do dia quatro"]
 
 
+def test_specific_date_query_filters_delegated_tasks() -> None:
+    store = InMemoryTaskStore()
+    context = store.identify_user("+5511999999999")
+    store.create_task(
+        context["company_id"],
+        context["user_id"],
+        "Delegada do dia quatro",
+        assignee_name="Joao",
+        due_at=datetime(2026, 5, 4, 10, 0),
+    )
+    store.create_task(
+        context["company_id"],
+        context["user_id"],
+        "Delegada do dia cinco",
+        assignee_name="Joao",
+        due_at=datetime(2026, 5, 5, 10, 0),
+    )
+
+    tasks = store.list_delegated_tasks(
+        context["company_id"],
+        context["user_id"],
+        status_filter="date",
+        target_date=datetime(2026, 5, 4).date(),
+    )
+
+    assert [task.title for task in tasks] == ["Delegada do dia quatro"]
+
+
+def test_list_my_tasks_filters_delegated_tasks_by_client(monkeypatch) -> None:
+    memory_store = InMemoryTaskStore()
+    monkeypatch.setattr(tools, "store", memory_store)
+    context = memory_store.identify_user("+5511999999999")
+    memory_store.create_task(
+        context["company_id"],
+        context["user_id"],
+        "Delegada Nanocare",
+        assignee_name="Joao",
+        client_name="Nanocare",
+        due_at=datetime(2026, 5, 4, 10, 0),
+    )
+    memory_store.create_task(
+        context["company_id"],
+        context["user_id"],
+        "Delegada Alpha",
+        assignee_name="Joao",
+        client_name="Alpha",
+        due_at=datetime(2026, 5, 4, 11, 0),
+    )
+
+    result = tools.list_my_tasks(context, {"view": "delegated", "client_name": "Nanocare"})
+
+    assert [task["title"] for task in result["delegated_tasks"]] == ["Delegada Nanocare"]
+    assert result["total_delegated"] == 1
+
+
+def test_list_my_tasks_paginates_delegated_tasks(monkeypatch) -> None:
+    memory_store = InMemoryTaskStore()
+    monkeypatch.setattr(tools, "store", memory_store)
+    context = memory_store.identify_user("+5511999999999")
+    for index in range(tools.PAGE_SIZE + 1):
+        memory_store.create_task(
+            context["company_id"],
+            context["user_id"],
+            f"Delegada pagina {index + 1:02d}",
+            assignee_name="Joao",
+            due_at=datetime(2026, 5, 4, 10, index),
+        )
+
+    first_page = tools.list_my_tasks(context, {"view": "delegated"})
+    second_page = tools.list_my_tasks(context, {"view": "delegated", "page": 2})
+
+    assert len(first_page["delegated_tasks"]) == tools.PAGE_SIZE
+    assert first_page["has_more"] is True
+    assert [task["title"] for task in second_page["delegated_tasks"]] == ["Delegada pagina 11"]
+    assert second_page["has_more"] is False
+
+
 def test_empty_overdue_query_uses_overdue_copy() -> None:
     result = app_graph.invoke(
         {
@@ -616,7 +833,7 @@ def test_team_summary_includes_actionable_pending_details() -> None:
         context["user_id"],
         "Ajustar site",
         assignee_name="Joao",
-        due_at=datetime(2026, 5, 4, 18, 0),
+        due_at=datetime.now() + timedelta(days=1),
     )
     summary = store.team_summary(context["company_id"])
 
@@ -688,6 +905,21 @@ def test_invite_user_reply_confirms_invite() -> None:
     assert "Joao" in invited["reply"]
     assert "+554188880000" in invited["reply"]
     assert "Desenvolvedor" in invited["reply"]
+
+
+def test_member_can_invite_user() -> None:
+    invited = app_graph.invoke(
+        {
+            "from_phone": "+5511988888888",
+            "message": "convidar Pedro 554188881111 como Analista",
+            "provider_message_id": "test-member-invite-1",
+        }
+    )
+
+    assert "Convite enviado" in invited["reply"]
+    assert "Pedro" in invited["reply"]
+    assert invited["result"]["invited_by_name"] == "Joao"
+    assert invited["result"]["role"] == "member"
 
 
 def test_incomplete_invite_suggests_sharing_contact() -> None:
@@ -947,6 +1179,53 @@ def test_onboarding_does_not_accept_greetings_as_profile_data() -> None:
     assert "seu cargo" in invalid_job_title["reply"]
 
 
+def test_onboarding_allows_company_name_correction_before_user_name() -> None:
+    phone = "+554188880787"
+
+    app_graph.invoke(
+        {
+            "from_phone": phone,
+            "message": "Ola",
+            "provider_message_id": "test-onboarding-company-correction-1",
+        }
+    )
+    app_graph.invoke(
+        {
+            "from_phone": phone,
+            "message": "Commandex",
+            "provider_message_id": "test-onboarding-company-correction-2",
+        }
+    )
+
+    corrected = app_graph.invoke(
+        {
+            "from_phone": phone,
+            "message": "Alterar nome da empresa para Commandix, ok?",
+            "provider_message_id": "test-onboarding-company-correction-3",
+        }
+    )
+
+    assert "Nome da empresa atualizado para Commandix" in corrected["reply"]
+    assert "nome completo" in corrected["reply"]
+
+    app_graph.invoke(
+        {
+            "from_phone": phone,
+            "message": "Matheus Martins",
+            "provider_message_id": "test-onboarding-company-correction-4",
+        }
+    )
+    completed = app_graph.invoke(
+        {
+            "from_phone": phone,
+            "message": "Desenvolvedor de IA",
+            "provider_message_id": "test-onboarding-company-correction-5",
+        }
+    )
+
+    assert completed["result"]["company_name"] == "Commandix"
+
+
 def test_store_returns_ambiguous_matches_before_completing() -> None:
     store = InMemoryTaskStore()
     context = store.identify_user("+5511999999999")
@@ -1097,6 +1376,87 @@ def test_contact_share_invite_asks_role_before_sending() -> None:
     assert "Convite enviado para Leo" in second["reply"]
     assert "Desenvolvedor de IA" in second["reply"]
     assert second["result"]["should_notify_invitee"] is True
+
+
+def test_contact_share_invite_allows_name_correction_before_role() -> None:
+    first = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Contato compartilhado: amorzao",
+            "provider_message_id": "test-contact-invite-name-correction-1",
+            "contact_share": {"name": "amorzão ❤️", "phone": "554196534097"},
+        }
+    )
+
+    assert "Qual será o cargo" in first["reply"]
+    assert "amorzão" in first["reply"]
+
+    corrected = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Alterar o nome do contato para Maria",
+            "provider_message_id": "test-contact-invite-name-correction-2",
+        }
+    )
+
+    assert "Nome do contato atualizado para Maria" in corrected["reply"]
+    assert "Qual será o cargo" in corrected["reply"]
+    assert corrected["result"]["params"]["name"] == "Maria"
+
+    sent = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Gestora Comercial",
+            "provider_message_id": "test-contact-invite-name-correction-3",
+        }
+    )
+
+    assert "Convite enviado para Maria" in sent["reply"]
+    assert "Gestora Comercial" in sent["reply"]
+
+
+def test_contact_share_invite_name_correction_handles_audio_transcript_style() -> None:
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Contato compartilhado: apelido",
+            "provider_message_id": "test-contact-invite-name-audio-correction-1",
+            "contact_share": {"name": "apelido", "phone": "554196534098"},
+        }
+    )
+
+    corrected = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "corrigir o nome do contato para maria por favor",
+            "provider_message_id": "test-contact-invite-name-audio-correction-2",
+        }
+    )
+
+    assert corrected["result"]["params"]["name"] == "Maria"
+    assert "Nome do contato atualizado para Maria" in corrected["reply"]
+
+
+def test_contact_share_invite_accepts_job_title_change_phrase() -> None:
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Contato compartilhado: Clara",
+            "provider_message_id": "test-contact-invite-job-title-phrase-1",
+            "contact_share": {"name": "Clara", "phone": "554196534099"},
+        }
+    )
+
+    sent = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "alterar cargo para gestora comercial",
+            "provider_message_id": "test-contact-invite-job-title-phrase-2",
+        }
+    )
+
+    assert "Convite enviado para Clara" in sent["reply"]
+    assert "Gestora Comercial" in sent["reply"]
 
 
 def test_typed_invite_without_role_asks_role_before_sending() -> None:
@@ -1338,3 +1698,137 @@ def test_assignee_can_request_task_reassignment() -> None:
     assert "faltou clareza" not in result["reply"]
 
 
+def test_parser_understands_global_client_rename() -> None:
+    parsed = parse_message("renomear cliente Derry para Dairy")
+
+    assert parsed.action == Action.edit_client
+    assert parsed.params["current_name"] == "Derry"
+    assert parsed.params["new_name"] == "Dairy"
+
+
+def test_parser_understands_specific_task_client_change() -> None:
+    parsed = parse_message("mudar o cliente da tarefa injetar mais documentos para Dairy")
+
+    assert parsed.action == Action.edit_task
+    assert parsed.params["task_reference"] == "Injetar mais documentos"
+    assert parsed.params["new_client_name"] == "Dairy"
+
+
+def test_parser_understands_member_correction() -> None:
+    parsed = parse_message("corrigir colaborador Joao para Joao Silva")
+
+    assert parsed.action == Action.edit_member
+    assert parsed.params["current_name"] == "Joao"
+    assert parsed.params["new_name"] == "Joao Silva"
+
+
+def test_parser_understands_member_job_title_change() -> None:
+    parsed = parse_message("alterar cargo do Joao para Desenvolvedor de IA")
+
+    assert parsed.action == Action.edit_member
+    assert parsed.params["current_name"] == "Joao"
+    assert parsed.params["new_job_title"] == "Desenvolvedor de IA"
+
+
+def test_parser_understands_self_job_title_change() -> None:
+    parsed = parse_message("alterar meu cargo para CEO")
+
+    assert parsed.action == Action.edit_member
+    assert parsed.params["target_self"] is True
+    assert parsed.params["new_job_title"] == "CEO"
+
+
+def test_memory_store_renames_client_across_tasks() -> None:
+    memory_store = InMemoryTaskStore()
+    context = memory_store.identify_user("+5511999999999")
+    task = memory_store.create_task(
+        context["company_id"],
+        context["user_id"],
+        "Injetar documentos",
+        client_name="Derry",
+    )
+
+    result = memory_store.update_client_name(context["company_id"], "Derry", "Dairy")
+
+    assert result is not None
+    assert result["renamed"] is True
+    assert result["affected_tasks"] == 1
+    assert task.client_name == "Dairy"
+    assert memory_store.list_tasks(context["company_id"], context["user_id"], client_name="Dairy") == [task]
+
+
+def test_memory_store_updates_member_job_title() -> None:
+    memory_store = InMemoryTaskStore()
+    context = memory_store.identify_user("+5511999999999")
+    updated = memory_store.update_member_job_title(context["company_id"], str(memory_store.joao_id), "Desenvolvedor")
+
+    assert updated is True
+    members = memory_store.list_company_members(context["company_id"])
+    joao = next(member for member in members if member["name"] == "Joao")
+    assert joao["job_title"] == "Desenvolvedor"
+
+
+def test_graph_renames_client_and_specific_task_edit_reply_shows_client() -> None:
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Joao, revisar contrato da Zedry amanha as 18",
+            "provider_message_id": "test-client-rename-create-1",
+        }
+    )
+
+    renamed = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "renomear cliente Zedry para Zairy",
+            "provider_message_id": "test-client-rename-1",
+        }
+    )
+
+    assert "Cliente atualizado" in renamed["reply"]
+    assert "Zedry → Zairy" in renamed["reply"]
+
+    app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "Joao, ajustar proposta da Clidro amanha as 18",
+            "provider_message_id": "test-task-client-edit-create-1",
+        }
+    )
+    edited = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "mudar o cliente da tarefa ajustar proposta para Clidra",
+            "provider_message_id": "test-task-client-edit-1",
+        }
+    )
+
+    assert "Tarefa atualizada" in edited["reply"]
+    assert "Cliente: Clidra" in edited["reply"]
+
+
+def test_graph_updates_member_job_title() -> None:
+    updated = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "alterar cargo do Joao para Desenvolvedor",
+            "provider_message_id": "test-member-job-title-1",
+        }
+    )
+
+    assert "Cargo atualizado" in updated["reply"]
+    assert "Joao: Desenvolvedor" in updated["reply"]
+    assert updated["result"]["new_job_title"] == "Desenvolvedor"
+
+
+def test_graph_updates_self_job_title() -> None:
+    updated = app_graph.invoke(
+        {
+            "from_phone": "+5511999999999",
+            "message": "alterar meu cargo para CEO",
+            "provider_message_id": "test-member-job-title-self-1",
+        }
+    )
+
+    assert "Cargo atualizado" in updated["reply"]
+    assert "Ana: CEO" in updated["reply"]

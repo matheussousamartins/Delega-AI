@@ -69,6 +69,7 @@ def list_my_tasks(context: CompanyContext, params: dict[str, Any]) -> dict[str, 
     view = params.get("view", "my")
     status_filter = params.get("filter", "pending")
     client_name = params.get("client_name") or None
+    target_date = _parse_date(params.get("date"))
     page = max(1, int(params.get("page") or 1))
     offset = (page - 1) * PAGE_SIZE
 
@@ -78,6 +79,7 @@ def list_my_tasks(context: CompanyContext, params: dict[str, Any]) -> dict[str, 
             created_by=context["user_id"],
             status_filter=status_filter,
             client_name=client_name,
+            target_date=target_date,
         )
         delegated_page = all_delegated[offset : offset + PAGE_SIZE]
         has_more = (offset + PAGE_SIZE) < len(all_delegated)
@@ -97,7 +99,7 @@ def list_my_tasks(context: CompanyContext, params: dict[str, Any]) -> dict[str, 
         company_id=context["company_id"],
         assigned_to=context["user_id"],
         status_filter=status_filter,
-        target_date=_parse_date(params.get("date")),
+        target_date=target_date,
         client_name=client_name,
     )
 
@@ -107,6 +109,7 @@ def list_my_tasks(context: CompanyContext, params: dict[str, Any]) -> dict[str, 
             created_by=context["user_id"],
             status_filter=status_filter,
             client_name=client_name,
+            target_date=target_date,
         )
         tasks_page = all_tasks[offset : offset + PAGE_SIZE]
         delegated_page = all_delegated[offset : offset + PAGE_SIZE]
@@ -281,9 +284,6 @@ def team_summary(context: CompanyContext, params: dict[str, Any]) -> dict[str, A
 
 
 def invite_user(context: CompanyContext, params: dict[str, Any]) -> dict[str, Any]:
-    if context["role"] not in {"owner", "admin", "manager"}:
-        return {"invited": False, "reason": "permission_denied"}
-
     name = params.get("name")
     phone = params.get("phone")
     if not name or not phone:
@@ -436,6 +436,8 @@ def task_update_payload(context: CompanyContext, task, update_type: str) -> dict
         "title": task.title,
         "status": task.status,
         "due_at": task.due_at.isoformat() if task.due_at else None,
+        "client_id": str(task.client_id) if task.client_id else None,
+        "client_name": task.client_name,
         "created_by": created_by,
         "created_by_name": store.get_user_name(created_by),
         "created_by_phone": creator_phone,
@@ -448,6 +450,18 @@ def task_update_payload(context: CompanyContext, task, update_type: str) -> dict
         "should_notify_task_creator": notify_creator,
         "should_notify_task_assignee": notify_assignee,
     }
+
+
+def edit_client(context: CompanyContext, params: dict[str, Any]) -> dict[str, Any]:
+    current_name = str(params.get("current_name") or "").strip()
+    new_name = str(params.get("new_name") or "").strip()
+    if not current_name or not new_name:
+        return {"renamed": False, "reason": "missing_params"}
+
+    result = store.update_client_name(context["company_id"], current_name, new_name)
+    if result is None:
+        return {"renamed": False, "reason": "client_not_found", "current_name": current_name}
+    return result
 
 
 def cancel_task(context: CompanyContext, params: dict[str, Any]) -> dict[str, Any]:
@@ -632,10 +646,6 @@ def _task_summary(task) -> dict[str, Any]:
         "title": task.title,
         "due_at": task.due_at.isoformat() if task.due_at else None,
     }
-
-
-
-
 
 
 

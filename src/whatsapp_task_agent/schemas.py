@@ -25,6 +25,7 @@ class Action(StrEnum):
     team_summary = "team_summary"
     invite_user = "invite_user"
     edit_member = "edit_member"
+    edit_client = "edit_client"
     cannot_do_task = "cannot_do_task"
     needs_help_task = "needs_help_task"
     reassign_task = "reassign_task"

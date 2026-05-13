@@ -40,6 +40,11 @@ async def _verify_evolution_webhook(
 ) -> None:
     secret = settings.evolution_webhook_secret
     if not secret:
+        if settings.app_env == "production":
+            raise HTTPException(
+                status_code=503,
+                detail="evolution_webhook_secret_not_configured",
+            )
         return
 
     token = apikey or request.headers.get("authorization", "").removeprefix("Bearer ")
@@ -82,7 +87,11 @@ def observe_messages(limit: int = Query(default=50, ge=1, le=200)) -> ObserveRes
     return ObserveResponse(count=len(entries), messages=entries)
 
 
-@app.post("/webhooks/whatsapp", response_model=AgentResponse)
+@app.post(
+    "/webhooks/whatsapp",
+    response_model=AgentResponse,
+    dependencies=[Depends(_verify_observe_key)],
+)
 def whatsapp_webhook(payload: WhatsAppInput) -> AgentResponse:
     state = app_graph.invoke(payload.model_dump())
     return AgentResponse(
@@ -178,6 +187,8 @@ def run_reminders(
     payload: dict[str, Any] | None = Body(default=None),
     x_job_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    if not settings.reminder_job_secret and settings.app_env == "production":
+        raise HTTPException(status_code=503, detail="reminder_job_secret_not_configured")
     if settings.reminder_job_secret and x_job_secret != settings.reminder_job_secret:
         raise HTTPException(status_code=401, detail="invalid_job_secret")
 
@@ -194,6 +205,8 @@ def run_notification_retries(
     payload: dict[str, Any] | None = Body(default=None),
     x_job_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    if not settings.reminder_job_secret and settings.app_env == "production":
+        raise HTTPException(status_code=503, detail="reminder_job_secret_not_configured")
     if settings.reminder_job_secret and x_job_secret != settings.reminder_job_secret:
         raise HTTPException(status_code=401, detail="invalid_job_secret")
 
@@ -234,12 +247,14 @@ def run_notification_retries(
 
 
 def _send_evolution_reply(to_phone: str, reply: str) -> dict[str, str]:
+    if not settings.evolution_send_enabled:
+        return {"status": "dry_run"}
+
     client = build_evolution_client()
     if client is None:
         return {"status": "not_configured"}
 
     try:
-        _send_typing_with_client(client, to_phone)
         response = client.send_text(number=to_phone, text=reply)
     except Exception as exc:
         logger.error("evolution_send_failed", extra={"exc_type": type(exc).__name__}, exc_info=True)
@@ -254,7 +269,6 @@ def _send_evolution_reply_with_tts(to_phone: str, reply: str) -> dict[str, str]:
         client = build_evolution_client()
         if client is not None:
             try:
-                _send_typing_with_client(client, to_phone)
                 response = client.send_audio(number=to_phone, audio_bytes=audio_bytes)
                 return {"status": "sent_audio", "provider_response": response}
             except Exception as exc:
@@ -276,6 +290,9 @@ def _send_evolution_typing(to_phone: str, thinking: bool = False) -> dict[str, s
     keep the animation alive while the agent is processing.  The default short
     delay is used for the quick pulse that fires just before the reply is sent.
     """
+    if not settings.evolution_send_enabled:
+        return {"status": "skipped", "reason": "send_disabled"}
+
     client = build_evolution_client()
     if client is None:
         return {"status": "not_configured"}
@@ -469,18 +486,18 @@ def _send_notification_record(notification: dict[str, Any]) -> dict[str, str]:
 
 def _format_delegation_notification(result: dict[str, Any]) -> str:
     lines = [
-        "Nova tarefa para você.",
+        "📌 Nova tarefa para você.",
         "",
         f"Tarefa: {result['title']}",
     ]
     if result.get("created_by_name"):
-        lines.append(f"Criada por: {result['created_by_name']}")
+        lines.append(f"👤 Criada por: {result['created_by_name']}")
     if result.get("client_name"):
-        lines.append(f"Cliente: {result['client_name']}")
+        lines.append(f"🏢 Cliente: {result['client_name']}")
     if result.get("due_at"):
-        lines.append(f"Prazo: {_format_due_at(result['due_at'])}")
+        lines.append(f"⏰ Prazo: {_format_due_at(result['due_at'])}")
     else:
-        lines.append("Prazo: sem prazo")
+        lines.append("⏰ Prazo: sem prazo")
     lines.extend(
         [
             "",
@@ -492,10 +509,10 @@ def _format_delegation_notification(result: dict[str, Any]) -> str:
 def _format_invite_notification(result: dict[str, Any]) -> str:
     company_name = result.get("company_name") or "sua empresa"
     lines = [
-        "Você recebeu um convite no Delega AI.",
+        "🏢 Você recebeu um convite no Delega AI.",
         "",
         f"Empresa: {company_name}",
-        f"Convidado por: {result['invited_by_name']}",
+        f"👤 Convidado por: {result['invited_by_name']}",
     ]
     if result.get("job_title"):
         lines.append(f"Cargo: {result['job_title']}")
@@ -511,7 +528,7 @@ def _format_invite_accepted_notification(result: dict[str, Any]) -> str:
     company_name = result.get("company_name") or "sua empresa"
     user_name = result.get("user_name") or "O colaborador"
     lines = [
-        f"{user_name} aceitou o convite e agora faz parte da {company_name}.",
+        f"✅ {user_name} aceitou o convite e agora faz parte da {company_name}.",
     ]
     if result.get("job_title"):
         lines.append(f"Cargo: {result['job_title']}")
@@ -529,55 +546,55 @@ def _format_task_update_notification(result: dict[str, Any]) -> str:
     update_type = result.get("task_update_type")
 
     if update_type == "started":
-        lines = [f"{actor} começou a tarefa.", "", f"Tarefa: {title}", "Status: em andamento"]
+        lines = [f"🔄 {actor} começou a tarefa.", "", f"📌 Tarefa: {title}", "Status: em andamento"]
     elif update_type == "completed":
-        lines = [f"{actor} concluiu a tarefa.", "", f"Tarefa: {title}", "Status: concluída"]
+        lines = [f"✅ {actor} concluiu a tarefa.", "", f"📌 Tarefa: {title}", "Status: concluída"]
     elif update_type == "rescheduled":
         lines = [
-            f"{actor} atualizou o prazo da tarefa.",
+            f"🔁 {actor} atualizou o prazo da tarefa.",
             "",
-            f"Tarefa: {title}",
-            f"Novo prazo: {_format_due_at(result['due_at'])}" if result.get("due_at") else "Novo prazo: sem prazo",
+            f"📌 Tarefa: {title}",
+            f"⏰ Novo prazo: {_format_due_at(result['due_at'])}" if result.get("due_at") else "⏰ Novo prazo: sem prazo",
         ]
     elif update_type == "cannot_do":
         lines = [
-            f"{actor} sinalizou que não consegue fazer a tarefa.",
+            f"⚠️ {actor} sinalizou que não consegue fazer a tarefa.",
             "",
-            f"Tarefa: {title}",
+            f"📌 Tarefa: {title}",
             "A tarefa continua aberta.",
         ]
     elif update_type == "needs_help":
         lines = [
-            f"{actor} pediu ajuda com a tarefa.",
+            f"⚠️ {actor} pediu ajuda com a tarefa.",
             "",
-            f"Tarefa: {title}",
+            f"📌 Tarefa: {title}",
             "A tarefa continua aberta.",
         ]
     elif update_type == "reassign_requested":
         lines = [
-            f"{actor} pediu para repassar a tarefa.",
+            f"🔁 {actor} pediu para repassar a tarefa.",
             "",
-            f"Tarefa: {title}",
+            f"📌 Tarefa: {title}",
             "A tarefa continua aberta.",
         ]
     elif update_type == "edited":
-        lines = [f"{actor} editou a tarefa.", "", f"Tarefa: {title}"]
+        lines = [f"✅ {actor} editou a tarefa.", "", f"📌 Tarefa: {title}"]
     elif update_type == "cancelled":
         lines = [
-            f"{actor} cancelou a tarefa.",
+            f"❌ {actor} cancelou a tarefa.",
             "",
-            f"Tarefa: {title}",
+            f"📌 Tarefa: {title}",
             "Status: cancelada",
         ]
     elif update_type == "due_date_cleared":
         lines = [
-            f"{actor} removeu o prazo da tarefa.",
+            f"✅ {actor} removeu o prazo da tarefa.",
             "",
-            f"Tarefa: {title}",
-            "Prazo: sem prazo",
+            f"📌 Tarefa: {title}",
+            "⏰ Prazo: sem prazo",
         ]
     else:
-        lines = [f"{actor} atualizou uma tarefa.", "", f"Tarefa: {title}"]
+        lines = [f"✅ {actor} atualizou uma tarefa.", "", f"📌 Tarefa: {title}"]
 
     return "\n".join(lines)
 
@@ -589,31 +606,31 @@ def _format_task_update_for_assignee(result: dict[str, Any]) -> str:
 
     if update_type == "rescheduled":
         lines = [
-            f"{actor} atualizou o prazo da sua tarefa.",
+            f"🔁 {actor} atualizou o prazo da sua tarefa.",
             "",
-            f"Tarefa: {title}",
-            f"Novo prazo: {_format_due_at(result['due_at'])}" if result.get("due_at") else "Novo prazo: sem prazo",
+            f"📌 Tarefa: {title}",
+            f"⏰ Novo prazo: {_format_due_at(result['due_at'])}" if result.get("due_at") else "⏰ Novo prazo: sem prazo",
         ]
     elif update_type == "edited":
-        lines = [f"{actor} editou a tarefa.", "", f"Tarefa: {title}"]
+        lines = [f"✅ {actor} editou a tarefa.", "", f"📌 Tarefa: {title}"]
     elif update_type == "completed":
-        lines = [f"{actor} marcou a tarefa como concluída.", "", f"Tarefa: {title}"]
+        lines = [f"✅ {actor} marcou a tarefa como concluída.", "", f"📌 Tarefa: {title}"]
     elif update_type == "cancelled":
         lines = [
-            f"{actor} cancelou a tarefa.",
+            f"❌ {actor} cancelou a tarefa.",
             "",
-            f"Tarefa: {title}",
+            f"📌 Tarefa: {title}",
             "Esta tarefa foi cancelada e removida da sua lista.",
         ]
     elif update_type == "due_date_cleared":
         lines = [
-            f"{actor} removeu o prazo da sua tarefa.",
+            f"✅ {actor} removeu o prazo da sua tarefa.",
             "",
-            f"Tarefa: {title}",
-            "Prazo: sem prazo",
+            f"📌 Tarefa: {title}",
+            "⏰ Prazo: sem prazo",
         ]
     else:
-        lines = [f"{actor} atualizou a tarefa.", "", f"Tarefa: {title}"]
+        lines = [f"✅ {actor} atualizou a tarefa.", "", f"📌 Tarefa: {title}"]
 
     return "\n".join(lines)
 def _format_due_at(value: str) -> str:
@@ -687,8 +704,6 @@ def _process_audio_event(event) -> EvolutionWebhookResponse:
             outbound_error=outbound.get("error"),
         )
 
-
-    _send_evolution_typing(event.from_phone, thinking=True)
     state = app_graph.invoke(
         WhatsAppInput(
             from_phone=event.from_phone,

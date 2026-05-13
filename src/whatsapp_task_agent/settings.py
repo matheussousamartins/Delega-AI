@@ -9,8 +9,8 @@ class Settings(BaseSettings):
     evolution_api_key: str | None = None
     evolution_send_enabled: bool = False
     evolution_typing_enabled: bool = True
-    evolution_typing_delay_ms: int = 1500
-    evolution_typing_thinking_delay_ms: int = 4000
+    evolution_typing_delay_ms: int = 500
+    evolution_typing_thinking_delay_ms: int = 1500
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_transcription_model: str = "gpt-4o-mini-transcribe"
@@ -37,5 +37,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-

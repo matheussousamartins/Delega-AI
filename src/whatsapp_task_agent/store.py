@@ -100,6 +100,48 @@ class InMemoryTaskStore:
 
     def list_clients(self, company_id: str) -> list[dict]:
         return [{"id": str(client_id), "name": name} for client_id, name in self.clients.items()]
+
+    def update_client_name(self, company_id: str, current_name: str, new_name: str) -> dict | None:
+        if not current_name or not new_name:
+            return None
+        current_normalized = _normalize(current_name)
+        new_normalized = _normalize(new_name)
+        old_id = next(
+            (client_id for client_id, existing in self.clients.items() if _normalize(existing) == current_normalized),
+            None,
+        )
+        if old_id is None:
+            return None
+
+        target_id = next(
+            (
+                client_id
+                for client_id, existing in self.clients.items()
+                if client_id != old_id and _normalize(existing) == new_normalized
+            ),
+            None,
+        )
+        affected_tasks = [task for task in self.tasks.values() if task.client_id == old_id]
+        merged = target_id is not None
+        if target_id is not None:
+            self.clients[target_id] = new_name
+            self.clients.pop(old_id, None)
+            for task in affected_tasks:
+                task.client_id = target_id
+                task.client_name = new_name
+        else:
+            self.clients[old_id] = new_name
+            for task in affected_tasks:
+                task.client_name = new_name
+
+        return {
+            "renamed": True,
+            "old_name": current_name,
+            "new_name": new_name,
+            "affected_tasks": len(affected_tasks),
+            "merged": merged,
+        }
+
     def get_user_name(self, user_id: str) -> str | None:
         try:
             return self.users.get(UUID(user_id))
@@ -120,6 +162,16 @@ class InMemoryTaskStore:
         if uid not in self.users:
             return False
         self.users[uid] = new_name
+        return True
+
+    def update_member_job_title(self, company_id: str, target_user_id: str, new_job_title: str) -> bool:
+        try:
+            uid = UUID(target_user_id)
+        except ValueError:
+            return False
+        if uid not in self.users:
+            return False
+        self.user_job_titles[uid] = new_job_title
         return True
 
     def create_task(
@@ -212,6 +264,7 @@ class InMemoryTaskStore:
         created_by: str,
         status_filter: str = "pending",
         client_name: str | None = None,
+        target_date: date | None = None,
     ) -> list[Task]:
         tasks = [
             task
@@ -222,6 +275,16 @@ class InMemoryTaskStore:
         ]
         if status_filter in {"pending", "open"}:
             tasks = [task for task in tasks if task.status in {TaskStatus.pending, TaskStatus.in_progress}]
+        elif status_filter == "today":
+            today_start = datetime.combine(datetime.now().date(), time.min)
+            today_end = datetime.combine(datetime.now().date(), time.max)
+            tasks = [
+                task
+                for task in tasks
+                if task.status in {TaskStatus.pending, TaskStatus.in_progress}
+                and task.due_at is not None
+                and today_start <= _as_naive_datetime(task.due_at) <= today_end
+            ]
         elif status_filter == "overdue":
             now = datetime.now()
             tasks = [
@@ -229,6 +292,14 @@ class InMemoryTaskStore:
                 if task.status in {TaskStatus.pending, TaskStatus.in_progress, TaskStatus.overdue}
                 and task.due_at is not None
                 and _as_naive_datetime(task.due_at) < now
+            ]
+        elif status_filter == "date" and target_date is not None:
+            tasks = [
+                task
+                for task in tasks
+                if task.status in {TaskStatus.pending, TaskStatus.in_progress}
+                and task.due_at is not None
+                and _as_naive_datetime(task.due_at).date() == target_date
             ]
         elif status_filter == "done":
             tasks = [task for task in tasks if task.status == TaskStatus.done]
@@ -1045,5 +1116,3 @@ def build_store():
 
 
 store = build_store()
-
-

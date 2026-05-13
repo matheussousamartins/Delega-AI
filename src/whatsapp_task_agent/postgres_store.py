@@ -116,6 +116,22 @@ class PostgresTaskStore:
             conn.commit()
         return (result.rowcount or 0) > 0
 
+    def update_member_job_title(self, company_id: str, target_user_id: str, new_job_title: str) -> bool:
+        with self._connect() as conn:
+            result = conn.execute(
+                """
+                update users set job_title = %(new_job_title)s
+                where id = %(user_id)s
+                  and exists (
+                      select 1 from company_members
+                      where company_id = %(company_id)s and user_id = %(user_id)s
+                  )
+                """,
+                {"new_job_title": new_job_title, "user_id": target_user_id, "company_id": company_id},
+            )
+            conn.commit()
+        return (result.rowcount or 0) > 0
+
     def list_company_members(self, company_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -151,6 +167,93 @@ class PostgresTaskStore:
                 {"company_id": company_id},
             ).fetchall()
         return [{"id": str(row["id"]), "name": row["name"]} for row in rows]
+
+    def update_client_name(self, company_id: str, current_name: str, new_name: str) -> dict[str, Any] | None:
+        if not current_name or not new_name:
+            return None
+        with self._connect() as conn:
+            old_client = conn.execute(
+                """
+                select id, name
+                from clients
+                where company_id = %(company_id)s
+                  and normalized_name = lower(%(current_name)s)
+                """,
+                {"company_id": company_id, "current_name": current_name},
+            ).fetchone()
+            if old_client is None:
+                return None
+
+            affected_tasks = conn.execute(
+                """
+                select count(*) as total
+                from tasks
+                where company_id = %(company_id)s
+                  and client_id = %(old_client_id)s
+                """,
+                {"company_id": company_id, "old_client_id": old_client["id"]},
+            ).fetchone()["total"]
+
+            target_client = conn.execute(
+                """
+                select id, name
+                from clients
+                where company_id = %(company_id)s
+                  and normalized_name = lower(%(new_name)s)
+                  and id != %(old_client_id)s
+                """,
+                {"company_id": company_id, "new_name": new_name, "old_client_id": old_client["id"]},
+            ).fetchone()
+
+            if target_client is not None:
+                conn.execute(
+                    """
+                    update tasks
+                    set client_id = %(target_client_id)s, updated_at = now()
+                    where company_id = %(company_id)s
+                      and client_id = %(old_client_id)s
+                    """,
+                    {
+                        "company_id": company_id,
+                        "old_client_id": old_client["id"],
+                        "target_client_id": target_client["id"],
+                    },
+                )
+                conn.execute(
+                    """
+                    update clients
+                    set name = %(new_name)s, normalized_name = lower(%(new_name)s)
+                    where id = %(target_client_id)s
+                    """,
+                    {"new_name": new_name, "target_client_id": target_client["id"]},
+                )
+                conn.execute("delete from clients where id = %(old_client_id)s", {"old_client_id": old_client["id"]})
+                conn.commit()
+                return {
+                    "renamed": True,
+                    "old_name": old_client["name"],
+                    "new_name": new_name,
+                    "affected_tasks": affected_tasks,
+                    "merged": True,
+                }
+
+            conn.execute(
+                """
+                update clients
+                set name = %(new_name)s, normalized_name = lower(%(new_name)s)
+                where id = %(old_client_id)s
+                """,
+                {"new_name": new_name, "old_client_id": old_client["id"]},
+            )
+            conn.commit()
+            return {
+                "renamed": True,
+                "old_name": old_client["name"],
+                "new_name": new_name,
+                "affected_tasks": affected_tasks,
+                "merged": False,
+            }
+
     def create_task(
         self,
         company_id: str,
@@ -274,6 +377,7 @@ class PostgresTaskStore:
         created_by: str,
         status_filter: str = "pending",
         client_name: str | None = None,
+        target_date: date | None = None,
     ) -> list[Task]:
         clauses = [
             "t.company_id = %(company_id)s",
@@ -284,9 +388,18 @@ class PostgresTaskStore:
 
         if status_filter in {"pending", "open"}:
             clauses.append("t.status in ('pending', 'in_progress')")
+        elif status_filter == "today":
+            clauses.append("t.status in ('pending', 'in_progress')")
+            clauses.append("t.due_at >= date_trunc('day', now())")
+            clauses.append("t.due_at < date_trunc('day', now()) + interval '1 day'")
         elif status_filter == "overdue":
             clauses.append("t.status in ('pending', 'in_progress', 'overdue')")
             clauses.append("t.due_at < now()")
+        elif status_filter == "date" and target_date is not None:
+            clauses.append("t.status in ('pending', 'in_progress')")
+            clauses.append("t.due_at >= %(target_date)s::date")
+            clauses.append("t.due_at < %(target_date)s::date + interval '1 day'")
+            params["target_date"] = target_date
         elif status_filter == "done":
             clauses.append("t.status = 'done'")
 
@@ -1848,4 +1961,3 @@ def _invite_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "company_name": row.get("company_name"),
         "invited_by_name": row.get("invited_by_name"),
     }
-
